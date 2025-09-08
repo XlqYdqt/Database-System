@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Dict, Optional, Any
-from ..storage.page import Page
-from ..storage.buffer_pool import BufferPool
+from ..storage.lru_replacer import Page
+from ..storage.buffer_pool_manager import BufferPool
 
 class StorageEngine:
     """存储引擎，负责行数据和页面之间的映射"""
