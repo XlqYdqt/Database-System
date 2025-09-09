@@ -2,21 +2,50 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Any
-from sql.ast import *
+from engine.storage_engine import StorageEngine
+from engine.Catelog.catelog import Catalog
+
+
 from engine.storage_engine import StorageEngine
 
 class SeqScanOperator:
-    """顺序扫描算子的具体实现"""
-    def __init__(self, table_name: str):
+    """全表扫描算子的具体实现"""
+    def __init__(self, table_name: str, storage_engine: StorageEngine, catalog: Catalog):
         self.table_name = table_name
-        self.storage_engine = StorageEngine()
-    
+        self.storage_engine = storage_engine
+        self.catalog = catalog
+
     def execute(self) -> List[Any]:
         """执行顺序扫描操作"""
         # 调用存储引擎扫描表
         rows = self.storage_engine.scan_table(self.table_name)
         if not rows:
             return []
-            
-        # TODO: 将字节序列转换为行数据
-        return rows
+
+        # 从 Catalog 获取 schema
+        schema = self.catalog.get_schema(self.table_name)
+
+        # 逐行解码
+        decoded_rows = []
+        for raw in rows:
+            values = self.decode_tuple(raw, schema)
+            row_dict = {col_name: val for (col_name, _), val in zip(schema, values)}
+            decoded_rows.append(row_dict)
+        return decoded_rows
+
+    def decode_tuple(self, raw: bytes, schema: list):
+        values, offset = [], 0
+        for _, col_type in schema:
+            if col_type == "INT":
+                val = int.from_bytes(raw[offset:offset + 4], "little", signed=True)
+                offset += 4
+                values.append(val)
+            elif col_type == "TEXT":
+                length = int.from_bytes(raw[offset:offset + 2], "little")
+                offset += 2
+                val = raw[offset:offset + length].decode("utf-8")
+                offset += length
+                values.append(val)
+            else:
+                raise NotImplementedError(f"Unsupported type: {col_type}")
+        return values

@@ -25,7 +25,7 @@ class FilterOperator(Operator):
     
     def _evaluate_condition(self, row: Any) -> bool:
         """评估WHERE条件"""
-        if isinstance(self.condition, BinaryExpr):
+        if isinstance(self.condition, BinaryExpression):
             # 获取行中的列值
             left_value = row[self.condition.left]
             right_value = self.condition.right

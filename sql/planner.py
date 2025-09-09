@@ -27,7 +27,7 @@ class ProjectOperator(Operator):
 
 class CreateTableOperator(Operator):
     """创建表算子"""
-    def __init__(self, table_name: str, columns: List[ColumnDef]):
+    def __init__(self, table_name: str, columns: List[ColumnDefinition]):
         self.table_name = table_name
         self.columns = columns
 
