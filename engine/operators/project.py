@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Any
-from ...sql.ast import *
+from sql.ast import *
+from sql.planner import Operator
 
 class ProjectOperator:
     """投影算子的具体实现"""

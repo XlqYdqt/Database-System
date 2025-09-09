@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Any
-from ...sql.ast import ColumnDef
-from ..storage_engine import StorageEngine
+from sql.ast import ColumnDef
+from engine.storage_engine import StorageEngine
 
 class CreateTableOperator:
     """创建表算子的具体实现"""
