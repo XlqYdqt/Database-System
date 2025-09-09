@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Any
-from ...sql.ast import *
-from ..storage_engine import StorageEngine
+from sql.ast import *
+from engine.storage_engine import StorageEngine
 
 class SeqScanOperator:
     """顺序扫描算子的具体实现"""

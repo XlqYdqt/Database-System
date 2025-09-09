@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Dict, Optional, Any
-from ..storage.lru_replacer import Page
-from ..storage.buffer_pool_manager import BufferPool
+# from storage.page import Page
+from storage.buffer_pool_manager import BufferPoolManager
+from storage.disk_manager import DiskManager
 
 class StorageEngine:
     """存储引擎，负责行数据和页面之间的映射"""
     def __init__(self, buffer_pool_size: int = 1024):
-        self.buffer_pool = BufferPool(buffer_pool_size)
+        self.buffer_pool = BufferPoolManager(buffer_pool_size)
         self.next_page_id = 0
+        self.file_manager = DiskManager("data")
     
     def create_table(self, table_name: str) -> bool:
         """创建表文件"""
-        # TODO: 创建表文件
-        return True
+        return self.file_manager.create_table_file(table_name)
     
     def insert_row(self, table_name: str, row_data: bytes) -> bool:
         """插入一行数据"""
@@ -39,7 +40,15 @@ class StorageEngine:
             if not page:
                 break
                 
-            # TODO: 从页中读取所有行
+            # 从页中读取所有行
+            row_id = 0
+            while True:
+                row_data = page.get_row(row_id)
+                if not row_data:
+                    break
+                results.append(row_data)
+                row_id += 1
+            
             page_id += 1
             
         return results
@@ -51,8 +60,25 @@ class StorageEngine:
     
     def _get_last_page(self, table_name: str) -> Optional[Page]:
         """获取表的最后一页"""
-        # TODO: 实现最后页面获取
-        return None
+        # 获取表文件大小
+        file_size = self.file_manager.get_table_size(table_name)
+        if file_size == 0:
+            return None
+            
+        # 计算最后一页的页面ID
+        last_page_id = (file_size - 1) // Page.PAGE_SIZE
+        
+        # 先从缓存池中查找
+        page = self.buffer_pool.get_page(last_page_id)
+        if page:
+            return page
+            
+        # 如果不在缓存池中，从文件读取
+        page = self.file_manager.read_page(table_name, last_page_id)
+        if page:
+            # 将页面放入缓存池
+            self.buffer_pool.pin_page(last_page_id)
+        return page
     
     def _create_new_page(self, table_name: str) -> Optional[Page]:
         """创建新页面"""

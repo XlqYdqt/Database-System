@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Optional, Any
-from ..sql.ast import *
-from ..sql.planner import Operator
+from sql.ast import *
+from sql.planner import Operator
 from .operators import *
 
 class ExecutionContext:
