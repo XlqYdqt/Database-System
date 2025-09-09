@@ -16,7 +16,7 @@ class LRUReplacer:
             capacity (int): 缓冲池中帧的总数。
         """
         self.capacity = capacity
-        # OrderedDict 可以作为 LRU 缓存的完美数据结构。
+        # OrderedDict 可以作为 LRU 缓存的完美数据结构。有序字典
         # 我们把它当作一个集合来用，只关心键 (frame_id)。
         # popitem(last=False) 可以 O(1) 移除最旧的项。
         # move_to_end() 可以 O(1) 将一项标记为最新。
