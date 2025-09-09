@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Any
-from ...sql.ast import *
+from sql.ast import *
+from sql.planner import Operator
 
-class FilterOperator:
+class FilterOperator(Operator):
     """过滤算子的具体实现"""
     def __init__(self, condition: Expression, child: Operator):
         self.condition = condition  # WHERE条件
