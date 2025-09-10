@@ -217,6 +217,8 @@ class BufferPoolManager:
             del self.page_table[page_id]
 
             # 2. 从 LRU 替换策略中移除。调用 pin 可以确保它不会被 victim 选中。
+            # pin_count=0,意味着可能已经调用过replacer的unpin方法了，加入到可淘汰列表中了
+            # 但一个空闲的帧不应该再参与“最近最少使用”的评选。可以直接使用而无需淘汰替换
             self.lru_replacer.pin(frame_id)
 
             # 3. 重置 Page 对象的元数据。
