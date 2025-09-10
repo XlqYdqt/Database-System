@@ -407,6 +407,23 @@ class CreateIndexStatement(Statement):
         where_str = f" WHERE {self.where_clause}" if self.where_clause else ""
         return f"CreateIndexStatement({concurrent_str}{unique_str}{exists_str}index={self.index_name}, table={self.table_name}, columns={self.columns}{type_str}{where_str})"
 
+class DropIndexStatement(Statement):
+    """DROP INDEX语句"""
+
+    def __init__(self, index_name: str, if_exists: bool = False, concurrently: bool = False):
+        """
+        :param index_name: 要删除索引的名称
+        :param if_exists: 如果索引不存在，是否忽略错误
+        :param concurrently: 并发删除索引的标志
+        """
+        self.index_name = index_name
+        self.if_exists = if_exists
+        self.concurrently = concurrently
+
+    def __repr__(self):
+        exists_str = " IF EXISTS" if self.if_exists else ""
+        concurrent_str = " CONCURRENTLY" if self.concurrently else ""
+        return f"DropIndexStatement(index={self.index_name}{exists_str}{concurrent_str})"
 
 class InsertStatement(Statement):
     """INSERT语句"""
