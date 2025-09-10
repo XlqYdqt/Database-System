@@ -39,6 +39,7 @@ class InternalPage(BPlusTreePage):
     key是用来划分键值范围的标志
     """
     # 假设 key 和 page_id （指针）都是4字节整数
+    # todo 此处的key可以根据需要来修改 目前索引key的类型只有整数
     KEY_FORMAT = '>i'
     POINTER_FORMAT = '>i'
     KEY_SIZE = struct.calcsize(KEY_FORMAT)
