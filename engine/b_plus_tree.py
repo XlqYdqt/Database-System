@@ -16,7 +16,7 @@ class BPlusTreePage:
     HEADER_FORMAT = 'bH'  # 节点类型(1 byte), 键数量(2 bytes)
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
-    def __init__(self, page: Page, is_leaf: bool):
+    def __init__(self, page: Page):
         self.page = page
         self.data = page.data
         # 在初始化时，从原始字节中反序列化出头部信息
@@ -47,38 +47,36 @@ class InternalPage(BPlusTreePage):
     CELL_SIZE = KEY_SIZE + POINTER_SIZE
 
     def __init__(self, page: Page):
-        super().__init__(page, is_leaf=False)
+        super().__init__(page)
+        self.is_leaf = False  # 明确设置类型
         self.pointers = []
         self.keys = []
-        # _deserialize_body 会根据头部中的 num_keys 填充 keys 和 pointers
         self._deserialize_body()
 
     def _deserialize_body(self):
         """从page.data中读取所有键和指针。"""
         offset = self.HEADER_SIZE
-        # 确保数据长度足够读取第一个指针
-        if len(self.data) >= offset + self.POINTER_SIZE:
-            ptr_data = self.data[offset: offset + self.POINTER_SIZE]
-            self.pointers.append(struct.unpack(self.POINTER_FORMAT, ptr_data)[0])
-            offset += self.POINTER_SIZE
+
+        ptr_data = self.data[offset: offset + self.POINTER_SIZE]
+        self.pointers.append(struct.unpack(self.POINTER_FORMAT, ptr_data)[0])
+        offset += self.POINTER_SIZE
 
         # 读取交替的 key 和 pointer
         for _ in range(self.num_keys):
-            # 确保数据长度足够读取一个 (key, pointer) 对
-            if len(self.data) >= offset + self.CELL_SIZE:
-                key_data = self.data[offset: offset + self.KEY_SIZE]
-                self.keys.append(struct.unpack(self.KEY_FORMAT, key_data)[0])
-                offset += self.KEY_SIZE
+            key_data = self.data[offset: offset + self.KEY_SIZE]
+            self.keys.append(struct.unpack(self.KEY_FORMAT, key_data)[0])
+            offset += self.KEY_SIZE
 
-                ptr_data = self.data[offset: offset + self.POINTER_SIZE]
-                self.pointers.append(struct.unpack(self.POINTER_FORMAT, ptr_data)[0])
-                offset += self.POINTER_SIZE
+            ptr_data = self.data[offset: offset + self.POINTER_SIZE]
+            self.pointers.append(struct.unpack(self.POINTER_FORMAT, ptr_data)[0])
+            offset += self.POINTER_SIZE
 
     def serialize(self):
         """
         将整个内部节点的逻辑结构（内存中的keys和pointers列表）
         序列化回底层的page.data字节数组中。
         """
+        self.num_keys = len(self.keys)
         self.serialize_header()
         offset = self.HEADER_SIZE
 
@@ -141,20 +139,21 @@ class LeafPage(BPlusTreePage):
     叶子节点页面的包装类。
     布局: [ HEADER | prev_pid | next_pid | key_1 | rid_1 | key_2 | rid_2 | ... ]
     """
-    KEY_FORMAT = '>i'
+    KEY_FORMAT = 'i'
     KEY_SIZE = struct.calcsize(KEY_FORMAT)
     # 假设 RID 是 (page_id, slot_num)，分别为4字节和2字节
-    RID_FORMAT = '>ih'
+    RID_FORMAT = 'ih'
     RID_SIZE = struct.calcsize(RID_FORMAT)
     CELL_SIZE = KEY_SIZE + RID_SIZE
 
     # 兄弟指针也放在头部区域
-    SIBLING_POINTER_FORMAT = '>i'
+    SIBLING_POINTER_FORMAT = 'i'
     SIBLING_POINTER_SIZE = struct.calcsize(SIBLING_POINTER_FORMAT)
     LEAF_HEADER_SIZE = BPlusTreePage.HEADER_SIZE + 2 * SIBLING_POINTER_SIZE
 
     def __init__(self, page: Page):
-        super().__init__(page, is_leaf=True)
+        super().__init__(page)
+        self.is_leaf = True
         self.key_rid_pairs = []
         self.prev_page_id = 0
         self.next_page_id = 0
@@ -181,6 +180,7 @@ class LeafPage(BPlusTreePage):
 
     def serialize(self):
         """将整个叶子节点的逻辑结构序列化回page.data。"""
+        self.num_keys = len(self.key_rid_pairs)
         self.serialize_header()
         offset = self.HEADER_SIZE
 
@@ -248,23 +248,34 @@ class BPlusTree:
             return None
 
         leaf_page_wrapper, _ = self._find_leaf_page(key)
+        if leaf_page_wrapper is None:
+            return None
         rid = leaf_page_wrapper.lookup(key)
 
         self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=False)
         return rid
 
-    def insert(self, key, rid: tuple):
+    def insert(self, key, rid: tuple)-> bool:
         """向B+树中插入一个新的 (key, RID) 对。"""
-        if self.root_page_id is None:
+        if self.root_page_id is None or self.root_page_id == 0:
             return self._start_new_tree(key, rid)
 
-        leaf_page_wrapper, parent_stack = self._find_leaf_page(key, is_for_insert=True)
+        leaf_page_wrapper, parent_stack = self._find_leaf_page(key)
+        if leaf_page_wrapper is None:
+            # 这通常意味着页面读取失败，是一个更深层次的错误
+            # 在这里我们选择插入失败
+            return False
+        #检查键是否已经存在
+        if leaf_page_wrapper.lookup(key) is not None:
+            self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=False)
+            return False  # 简单起见，我们不允许重复键
+
         leaf_page_wrapper.insert(key, rid)
 
         if not leaf_page_wrapper.is_full():
             leaf_page_wrapper.serialize()
             self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=True)
-            return
+            return False
 
         # --- 节点分裂逻辑 ---
         # 1. 创建新兄弟节点
@@ -276,10 +287,22 @@ class BPlusTree:
         new_leaf_wrapper.key_rid_pairs = leaf_page_wrapper.key_rid_pairs[mid_idx:]
         leaf_page_wrapper.key_rid_pairs = leaf_page_wrapper.key_rid_pairs[:mid_idx]
 
+        # 更新键数量
+        leaf_page_wrapper.num_keys = len(leaf_page_wrapper.key_rid_pairs)
+        new_leaf_wrapper.num_keys = len(new_leaf_wrapper.key_rid_pairs)
         # 3. 更新兄弟指针
-        new_leaf_wrapper.next_page_id = leaf_page_wrapper.next_page_id
+        original_next_pid = leaf_page_wrapper.next_page_id
+        new_leaf_wrapper.next_page_id = original_next_pid
         new_leaf_wrapper.prev_page_id = leaf_page_wrapper.page.page_id
         leaf_page_wrapper.next_page_id = new_leaf_wrapper.page.page_id
+
+        #更新原始下一个兄弟节点的prev指针
+        if original_next_pid != 0:
+            next_page_obj = self.bpm.fetch_page(original_next_pid)
+            next_leaf_wrapper = LeafPage(next_page_obj)
+            next_leaf_wrapper.prev_page_id = new_leaf_wrapper.page.page_id
+            next_leaf_wrapper.serialize()
+            self.bpm.unpin_page(next_leaf_wrapper.page.page_id, is_dirty=True)
 
         # 4. 获取要推到父节点的中间键
         middle_key = new_leaf_wrapper.key_rid_pairs[0][0]
@@ -289,28 +312,37 @@ class BPlusTree:
         new_leaf_wrapper.serialize()
 
         # 6. 将中间键插入父节点
-        self._insert_into_parent(leaf_page_wrapper, middle_key, new_leaf_wrapper, parent_stack)
+        root_changed = self._insert_into_parent(leaf_page_wrapper, middle_key, new_leaf_wrapper, parent_stack)
 
         # 7. 解钉所有相关页面
         self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=True)
         self.bpm.unpin_page(new_leaf_wrapper.page.page_id, is_dirty=True)
 
+        return root_changed
+
     def delete(self, key):
         """todo（可选任务）从B+树中删除一个键。"""
         pass
 
-    def _find_leaf_page(self, key, is_for_insert=False) -> (LeafPage, list):
+    def _find_leaf_page(self, key) -> (LeafPage, list):
         """
         辅助方法，从根节点开始遍历，找到目标叶子节点。
         返回: (LeafPage包装器, 父节点ID栈)
         """
         parent_stack = []
         current_page_id = self.root_page_id
+        if current_page_id is None or current_page_id == 0:
+            return None, []
 
         while True:
             page_obj = self.bpm.fetch_page(current_page_id)
+            if page_obj is None:  # 页面获取失败
+                # 需要释放之前固定的所有父页面
+                for pid in parent_stack:
+                    self.bpm.unpin_page(pid, is_dirty=False)
+                return None, []
             # 根据头部第一个字节判断页面类型
-            is_leaf = bool(struct.unpack_from('>b', page_obj.data, 0)[0])
+            is_leaf = bool(struct.unpack_from('b', page_obj.data, 0)[0])
 
             if is_leaf:
                 return LeafPage(page_obj), parent_stack
@@ -325,31 +357,34 @@ class BPlusTree:
         """当树为空时，创建第一个节点。"""
         page_obj = self.bpm.new_page()
         self.root_page_id = page_obj.page_id
-        # !!todo 重要: 实际应用中，必须将新的 self.root_page_id 持久化到 Catalog (Page 0) 中 !!
+        # 注意: root_page_id 已在内存中更新。调用者 (insert方法) 会返回 True，
+        # 上层引擎需要捕获此返回值，并从 self.root_page_id 获取新值以持久化到 Catalog 中。
 
         leaf_node = LeafPage(page_obj)
         leaf_node.insert(key, rid)
         leaf_node.serialize()
 
         self.bpm.unpin_page(self.root_page_id, is_dirty=True)
+        return True
 
-    def _insert_into_parent(self, left_child: BPlusTreePage, key, right_child: BPlusTreePage, parent_stack: list):
+    def _insert_into_parent(self, left_child: BPlusTreePage, key, right_child: BPlusTreePage,
+                            parent_stack: list) -> bool:
         """递归地将分裂产生的键和指针插入到父节点中。"""
         if not parent_stack:
             # 情况1: 左孩子是根节点，需要创建一个新的根
             new_root_page_obj = self.bpm.new_page()
             new_root = InternalPage(new_root_page_obj)
             self.root_page_id = new_root.page.page_id
-            # !!todo 重要: 同样需要将新的 self.root_page_id 持久化到 Catalog !!
+            # 注意: root_page_id 已在内存中更新。此方法会返回 True，
+            # 最终由顶层 insert 方法将此状态返回给上层引擎，由上层引擎负责持久化。
 
             new_root.keys = [key]
             new_root.pointers = [left_child.page.page_id, right_child.page.page_id]
             new_root.serialize()
 
             self.bpm.unpin_page(self.root_page_id, is_dirty=True)
-            return
+            return True
 
-        # 情况2: 存在父节点
         parent_page_id = parent_stack.pop()
         parent_page_obj = self.bpm.fetch_page(parent_page_id)
         parent_node = InternalPage(parent_page_obj)
@@ -358,32 +393,33 @@ class BPlusTree:
         if not parent_node.is_full():
             parent_node.serialize()
             self.bpm.unpin_page(parent_page_id, is_dirty=True)
-            return
+            return False
 
         # 情况3: 父节点也满了，需要递归分裂
-        # ... 实现内部节点的分裂逻辑，与叶子节点分裂类似 ...
         new_internal_page_obj = self.bpm.new_page()
         new_internal_node = InternalPage(new_internal_page_obj)
 
-        # 2. 移动一半键和指针
         mid_idx = len(parent_node.keys) // 2
-
-        # 中间的键将被推到上层
         key_to_push_up = parent_node.keys[mid_idx]
 
-        # 新节点获取后半部分的键和指针
+        # 将后半部分数据移动到新节点
         new_internal_node.keys = parent_node.keys[mid_idx + 1:]
         new_internal_node.pointers = parent_node.pointers[mid_idx + 1:]
 
-        # 旧节点保留前半部分
+        # 截断旧节点的数据
         parent_node.keys = parent_node.keys[:mid_idx]
         parent_node.pointers = parent_node.pointers[:mid_idx + 1]
 
-        # 3. 将中间键推到上层（递归调用 _insert_into_parent）
-        self._insert_into_parent(parent_node, key_to_push_up, new_internal_node, parent_stack)
+        # 分裂后更新两个内部节点的键数量
+        parent_node.num_keys = len(parent_node.keys)
+        new_internal_node.num_keys = len(new_internal_node.keys)
 
-        # 4. 序列化并解钉所有相关页面
+        # 递归调用，将分裂出的键推到更上一层
+        root_changed = self._insert_into_parent(parent_node, key_to_push_up, new_internal_node, parent_stack)
+
         parent_node.serialize()
         new_internal_node.serialize()
         self.bpm.unpin_page(parent_page_id, is_dirty=True)
-        self.bpm.unpin_page(new_internal_page_obj.page_id, is_dirty=True)
+        self.bpm.unpin_page(new_internal_page_obj.page.page_id, is_dirty=True)
+
+        return root_changed
