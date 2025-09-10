@@ -12,19 +12,50 @@ class StorageEngine:
     """存储引擎，负责行数据和页面之间的映射"""
     def __init__(self, catalog: Catalog, buffer_pool_size: int = 1024):
         self.buffer_pool = BufferPoolManager(buffer_pool_size)
-        self.next_page_id = 0
         self.file_manager = DiskManager("data")
         self.catalog = catalog # Store the catalog instance
         self.indexes: Dict[str, BPlusTree] = {} # Change to BPlusTree
+
+    def _get_table_metadata_page(self, table_name: str) -> Optional[Page]:
+        """获取表的元数据页 (page_id=0)"""
+        return self.buffer_pool.fetch_page(0, table_name)
+
+    def _update_table_metadata(self, table_name: str, total_pages: int):
+        """更新表的元数据，特别是总页数"""
+        metadata_page = self._get_table_metadata_page(table_name)
+        if not metadata_page:
+            # This should not happen if create_table is called first
+            return
+        # 简单地将 total_pages 写入元数据页的开始部分
+        # 实际应用中可能需要更复杂的序列化和反序列化
+        metadata_page.write_bytes(total_pages.to_bytes(4, 'little'), 0)
+        self.buffer_pool.unpin_page(metadata_page.page_id, True)
+
+    def _read_table_metadata(self, table_name: str) -> Dict[str, Any]:
+        """读取表的元数据"""
+        metadata_page = self._get_table_metadata_page(table_name)
+        if not metadata_page:
+            return {"total_pages": 0}
+        # 简单地从元数据页的开始部分读取 total_pages
+        total_pages = int.from_bytes(metadata_page.read_bytes(0, 4), 'little')
+        self.buffer_pool.unpin_page(metadata_page.page_id, False)
+        return {"total_pages": total_pages}
+
+
     
     # ------------------------
     # 表管理
     # ------------------------
     def create_table(self, table_name: str) -> bool:
-        """为新表分配首页并初始化索引"""
-        page = self.buffer_pool.new_page()
-        if not page:
+        """为新表分配首页 (page_id=0) 并初始化索引和元数据"""
+        # 尝试获取 page_id=0 作为元数据页
+        metadata_page = self.buffer_pool.new_page(table_name, 0) # 明确请求 page_id=0
+        if not metadata_page:
             return False
+
+        # 初始化元数据：总页数从1开始（包含元数据页本身）
+        self._update_table_metadata(table_name, 1) # metadata page is page 0
+
         # Initialize a B+ tree for the new table
         self.indexes[table_name] = BPlusTree()
         return True
@@ -76,7 +107,14 @@ class StorageEngine:
     def scan_table(self, table_name: str) -> List[bytes]:
         """扫描整个表"""
         results = []
-        page_id = 0
+        # 从元数据中获取总页数
+        metadata = self._read_table_metadata(table_name)
+        total_pages = metadata["total_pages"]
+        if total_pages == 0:
+            return results # No pages in table
+
+        # 从 page_id=1 开始扫描数据页，因为 page_id=0 是元数据页
+        page_id = 1
         
         # Use B+ tree to scan all RIDs and fetch rows
         if table_name in self.indexes:
@@ -105,36 +143,44 @@ class StorageEngine:
     
     def _get_page(self, table_name: str, page_id: int) -> Optional[Page]:
         """获取指定页面"""
-        return self.buffer_pool.fetch_page(page_id)
+        return self.buffer_pool.fetch_page(page_id, table_name)
     
     def _get_last_page(self, table_name: str) -> Optional[Page]:
         """获取表的最后一页"""
-        # 获取表文件大小
-        file_size = self.file_manager.get_table_size(table_name)
-        if file_size == 0:
+        # 从元数据中获取总页数
+        metadata = self._read_table_metadata(table_name)
+        total_pages = metadata["total_pages"]
+
+        if total_pages <= 1: # 只有元数据页或没有数据页
             return None
-            
-        # 计算最后一页的页面ID
-        last_page_id = (file_size - 1) // Page.PAGE_SIZE
-        
+
+        # 最后一页的ID是 total_pages - 1 (因为 page_id 从 0 开始，且 page_id=0 是元数据页)
+        last_page_id = total_pages - 1
+
         # 先从缓存池中查找
-        page = self.buffer_pool.get_page(last_page_id)
+        page = self.buffer_pool.fetch_page(last_page_id, table_name)
         if page:
             return page
-            
-        # 如果不在缓存池中，从文件读取
-        page = self.file_manager.read_page(table_name, last_page_id)
-        if page:
-            # 将页面放入缓存池
-            self.buffer_pool.pin_page(last_page_id)
-        return page
+
+        # 如果不在缓存池中，尝试从文件读取 (这应该由 BufferPoolManager 内部处理)
+        # 注意: DiskManager.read_page 通常不直接由 StorageEngine 调用，而是通过 BufferPoolManager
+        # 这里保留是为了逻辑完整性，但实际操作应依赖 BufferPoolManager 的 fetch_page
+        # page = self.file_manager.read_page(table_name, last_page_id)
+        # if page:
+        #     self.buffer_pool.pin_page(last_page_id) # fetch_page 已经处理了 pin
+        # return page
+        return None # 如果 fetch_page 失败，则返回 None
     
     def _create_new_page(self, table_name: str) -> Optional[Page]:
         """创建新页面"""
-        page = self.buffer_pool.new_page()
+        # 从元数据中获取下一个可用的 page_id
+        metadata = self._read_table_metadata(table_name)
+        next_page_id = metadata["total_pages"]
+
+        page = self.buffer_pool.new_page(table_name, next_page_id)
         if page:
-            # TODO: 将页面与表关联
-            self.next_page_id += 1
+            # 更新元数据中的总页数
+            self._update_table_metadata(table_name, next_page_id + 1)
         return page
 
     def _decode_value(self, row_data: bytes, offset: int, col_type: str) -> tuple[Any, int]:

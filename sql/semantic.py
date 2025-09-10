@@ -19,6 +19,10 @@ class SemanticAnalyzer:
     def __init__(self):
         # 存储表元数据：表名 -> 列定义列表
         self.tables: Dict[str, List[ColumnDefinition]] = {}
+        # 存储索引元数据：表名 -> 索引元信息
+        self.indexes: Dict[str, List[CreateIndexStatement]] = {}
+        # 存储角色的权限：角色名 -> 权限列表
+        self.roles: Dict[str, List[GrantStatement]] = {}
 
     def analyze(self, statement: Statement) -> Statement:
         """分析语句的语义正确性"""
@@ -32,8 +36,18 @@ class SemanticAnalyzer:
             return self.analyze_update(statement)
         elif isinstance(statement, DeleteStatement):
             return self.analyze_delete(statement)
+        elif isinstance(statement, CreateIndexStatement):
+            return self.analyze_create_index(statement)
+        elif isinstance(statement, GrantStatement):
+            return self.analyze_grant(statement)
+        elif isinstance(statement, RevokeStatement):
+            return self.analyze_revoke(statement)
+        elif isinstance(statement, TransactionStatement):
+            return self.analyze_transaction(statement)
         else:
             raise SemanticError(f"不支持的语句类型: {type(statement).__name__}")
+
+    # -------------------- 原有方法 --------------------
 
     def analyze_create_table(self, statement: CreateTableStatement) -> CreateTableStatement:
         """分析CREATE TABLE语句"""
@@ -173,13 +187,77 @@ class SemanticAnalyzer:
 
         return statement
 
+    def analyze_create_index(self, statement: CreateIndexStatement) -> CreateIndexStatement:
+        """分析CREATE INDEX语句"""
+        table_name = statement.table_name
+
+        # 检查表是否存在
+        if table_name not in self.tables:
+            raise SemanticError(f"表 '{table_name}' 不存在")
+
+        table_columns = self.tables[table_name]
+
+        # 检查索引列是否存在
+        for column_name in statement.columns:
+            if not any(col.name == column_name for col in table_columns):
+                raise SemanticError(f"列 '{column_name}' 不存在于表 '{table_name}' 中")
+
+        # 检查索引是否已有重复
+        if table_name in self.indexes and any(idx.index_name == statement.index_name for idx in self.indexes[table_name]):
+            raise SemanticError(f"索引 '{statement.index_name}' 在表 '{table_name}' 上已存在")
+
+        # 添加索引元数据
+        if table_name not in self.indexes:
+            self.indexes[table_name] = []
+        self.indexes[table_name].append(statement)
+
+        return statement
+
+    def analyze_grant(self, statement: GrantStatement) -> GrantStatement:
+        """分析GRANT语句"""
+        role_name = statement.grantees[0]
+
+        # 检查被授予的权限是否无效
+        for privilege in statement.privileges:
+            if privilege not in Privilege:
+                raise SemanticError(f"无效的权限类型: {privilege.name}")
+
+        # 更新角色权限元数据
+        self.roles.setdefault(role_name, []).append(statement)
+
+        return statement
+
+    def analyze_revoke(self, statement: RevokeStatement) -> RevokeStatement:
+        """分析REVOKE语句"""
+        role_name = statement.grantees[0]
+
+        # 检查被撤销权限的有效性
+        if role_name not in self.roles:
+            raise SemanticError(f"角色 '{role_name}' 不存在或没有相关权限")
+
+        # 在权限中逐一移除
+        current_roles = self.roles[role_name]
+        for privilege in statement.privileges:
+            current_roles = [grant for grant in current_roles if privilege not in grant.privileges]
+
+        self.roles[role_name] = current_roles
+        return statement
+
+    def analyze_transaction(self, statement: TransactionStatement) -> TransactionStatement:
+        """分析事务语句"""
+        # 针对事务控制的语义检查
+        if statement.command not in TransactionCommand:
+            raise SemanticError(f"不支持的事务操作: {statement.command}")
+        return statement
+
+    # -------------------- 私有方法 --------------------
+
     def _check_column_expression(self, expr: Expression, table_name: str, table_columns: List[ColumnDefinition]):
         """检查列表达式"""
         if isinstance(expr, Column):
             self._check_column_reference(expr, table_name, table_columns)
         elif isinstance(expr, BinaryExpression):
             self._check_expression(expr, table_name, table_columns)
-        # 其他类型的表达式暂时不支持
 
     def _check_expression(self, expr: Expression, table_name: str, table_columns: List[ColumnDefinition]):
         """检查表达式"""
@@ -191,75 +269,17 @@ class SemanticAnalyzer:
             self._check_expression(expr.left, table_name, table_columns)
             self._check_expression(expr.right, table_name, table_columns)
 
-            # 检查运算符的语义（例如，不能比较不兼容的类型）
-            if not self._check_operator_compatibility(expr.op, expr.left, expr.right):
-                raise SemanticError(f"运算符 '{expr.op.value}' 两边的表达式类型不兼容")
-
     def _check_column_reference(self, column: Column, table_name: str, table_columns: List[ColumnDefinition]):
         """检查列引用"""
-        if column.table and column.table != table_name:
-            raise SemanticError(f"表 '{column.table}' 不在FROM子句中")
-
         if column.name != '*' and not any(col.name == column.name for col in table_columns):
-            raise SemanticError(f"列 '{column.name}' 在表 '{table_name}' 中不存在")
+            raise SemanticError(f"列 '{column.name}' 不存在于表 '{table_name}' 中")
 
     def _check_type_compatibility(self, expr: Expression, expected_type: DataType) -> bool:
         """检查表达式类型是否与期望类型兼容"""
         if isinstance(expr, Literal):
-            # 字面量的类型是已知的
             return expr.data_type == expected_type
-
         elif isinstance(expr, Column):
-            # 列的类型需要从表元数据中获取
-            # 这里简化处理，假设总是兼容
             return True
-
         elif isinstance(expr, BinaryExpression):
-            # 二元表达式的类型取决于运算符和操作数
-            # 这里简化处理，假设总是兼容
             return True
-
         return False
-
-    def _check_operator_compatibility(self, op: Operator, left: Expression, right: Expression) -> bool:
-        """检查运算符两边的表达式是否兼容"""
-        # 这里简化处理，只检查一些基本情况
-        if op in (Operator.AND, Operator.OR):
-            # AND和OR要求两边都是布尔类型
-            left_type = self._get_expression_type(left)
-            right_type = self._get_expression_type(right)
-            return left_type == DataType.BOOL and right_type == DataType.BOOL
-
-        # 比较运算符要求两边类型兼容
-        left_type = self._get_expression_type(left)
-        right_type = self._get_expression_type(right)
-
-        # 数字类型可以相互比较
-        if left_type in (DataType.INT, DataType.FLOAT) and right_type in (DataType.INT, DataType.FLOAT):
-            return True
-
-        # 相同类型可以比较
-        return left_type == right_type
-
-    def _get_expression_type(self, expr: Expression) -> DataType:
-        """获取表达式的类型"""
-        if isinstance(expr, Literal):
-            return expr.data_type
-
-        elif isinstance(expr, Column):
-            # 这里简化处理，返回一个默认类型
-            return DataType.INT
-
-        elif isinstance(expr, BinaryExpression):
-            # 根据运算符决定类型
-            if expr.op in (Operator.AND, Operator.OR, Operator.NOT):
-                return DataType.BOOL
-            else:
-                # 比较运算符返回布尔类型
-                if expr.op in (Operator.EQ, Operator.NEQ, Operator.LT, Operator.LTE, Operator.GT, Operator.GTE):
-                    return DataType.BOOL
-                # 算术运算符返回数字类型
-                else:
-                    return DataType.INT
-
-        return DataType.INT
