@@ -43,7 +43,7 @@ class StorageEngine:
             raise RuntimeError("CatalogPage not found in buffer pool for flushing")
 
 
-    
+
     # ------------------------
     # 表管理
     # ------------------------
@@ -58,6 +58,7 @@ class StorageEngine:
             return False
         table_heap_page_id = table_heap_page_raw.page_id
         table_heap_page = TableHeapPage()
+        table_heap_page.add_page_id(table_heap_page_id) # Add its own page_id as per requirement
 
         # 为新表分配第一个数据页
         first_data_page = self.buffer_pool.new_page()
@@ -76,17 +77,20 @@ class StorageEngine:
         # 假设索引也需要一个根页面，这里简化处理，实际B+树可能内部管理页面分配
         # 这里我们为B+树的根节点分配一个页面ID，并将其存储在CatalogPage中
         # B+Tree 内部会管理其页面的分配和持久化
-        index_root_page_id = -1 # Placeholder, B+Tree will manage its own root page ID
+        # Placeholder, B+Tree will manage its own root page ID
+        rotate = self.buffer_pool.new_page()
+        index_root_page_id = rotate.page_id
+        table_heap_page.add_page_id(index_root_page_id)
 
         # Initialize a B+ tree for the new table
-        b_plus_tree = BPlusTree()
-        self.indexes[table_name] = b_plus_tree
+        # b_plus_tree = BPlusTree( self.buffer_pool,index_root_page_id)
+        # self.indexes[table_name] = b_plus_tree
 
         # 将表的元数据添加到 CatalogPage，现在存储 table_heap_page_id
         self.catalog_page.add_table(table_name, table_heap_page_id, index_root_page_id)
         self._flush_catalog_page()
         return True
-    
+
     def insert_row(self, table_name: str, row_data: bytes) -> bool:
         """插入一行数据"""
         # 1. 获取表的元数据
@@ -119,15 +123,15 @@ class StorageEngine:
             if not new_data_page:
                 self.buffer_pool.unpin_page(table_heap_page_id, False)
                 return False
-            
+
             last_page = new_data_page
             table_heap_page.add_page_id(new_data_page.page_id)
             table_heap_page_raw.data = bytearray(table_heap_page.serialize())
             self.buffer_pool.unpin_page(table_heap_page_id, True) # Mark table_heap_page as dirty
-        
+
         # 确保在使用完数据页后 unpin
         page = last_page # Use the found or newly created page
-        
+
         # 2. 插入数据
         row_id = self._page_insert_row(page, row_data)
         if row_id is None:
@@ -144,11 +148,12 @@ class StorageEngine:
         # 存储主键到 (page_id, row_id) 的映射到B+树
         if table_name not in self.indexes:
             # This should ideally not happen if create_table is called first
-            self.indexes[table_name] = BPlusTree()
-        
+            index_root_page_id = table_metadata['index_root_page_id']
+            self.indexes[table_name] = BPlusTree(self.buffer_pool, index_root_page_id)
+
         # Serialize RID (page_id, row_id) to bytes
         rid_bytes = page.page_id.to_bytes(4, 'little') + row_id.to_bytes(4, 'little')
-        
+
         # Convert pk_value to bytes for B+ tree key
         # This is a simplified conversion, actual implementation might need more robust serialization
         if pk_col_type == "INT":
@@ -158,12 +163,52 @@ class StorageEngine:
         else:
             raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type}")
 
-        self.indexes[table_name].insert(pk_bytes, rid_bytes)
+        self.indexes[table_name].insert(pk_bytes, tuple(rid_bytes))
 
         self.buffer_pool.unpin_page(page.page_id, True) # Mark data page as dirty
 
         return True
-    
+
+    def delete_row(self, table_name: str, pk_value: Any) -> bool:
+        """根据主键删除行数据"""
+        if table_name not in self.indexes:
+            return False
+
+        # Convert pk_value to bytes for B+ tree search
+        schema = self.catalog.get_schema(table_name)
+        pk_col_name, pk_col_type = schema[0]
+
+        if pk_col_type == "INT":
+            pk_bytes = pk_value.to_bytes(4, 'little', signed=True)
+        elif pk_col_type == "TEXT":
+            pk_bytes = pk_value.encode('utf-8')
+        else:
+            raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type}")
+
+        rid_bytes = self.indexes[table_name].search(pk_bytes)
+        if not rid_bytes:
+            return False # Key not found in index
+
+        # Deserialize RID (page_id, row_id) from bytes
+        page_id = int.from_bytes(rid_bytes[0:4], 'little')
+        row_id = int.from_bytes(rid_bytes[4:8], 'little')
+
+        page = self.buffer_pool.fetch_page(page_id)
+        if not page:
+            return False
+
+        # Delete the row from the page.
+        delete_success = self._page_delete_row(page, row_id)
+        if not delete_success:
+            self.buffer_pool.unpin_page(page_id, False)
+            return False
+
+        # # Delete the entry from the B+ tree.
+        # self.indexes[table_name].delete(pk_bytes)
+
+        self.buffer_pool.unpin_page(page_id, True) # Mark data page as dirty
+        return True
+
     def scan_table(self, table_name: str) -> List[bytes]:
         """扫描整个表"""
         results = []
@@ -192,7 +237,7 @@ class StorageEngine:
                     break
                 results.append(row_data)
                 row_id += 1
-            
+
             self.buffer_pool.unpin_page(data_page_id, False)
             # A proper implementation would involve a page directory or linked list of pages
             # For now, we'll just assume we can just try to create a new page if the root is full
@@ -200,11 +245,11 @@ class StorageEngine:
             # This logic needs to be improved significantly for a real database.
 
         return results
-    
+
     def _get_page(self, page_id: int) -> Optional[Page]:
         """获取指定页面"""
         return self.buffer_pool.fetch_page(page_id)
-    
+
     def _get_last_page(self, table_name: str) -> Optional[Page]:
         """获取表的最后一页"""
         # 从 CatalogPage 获取表的 heap_root_page_id
@@ -227,20 +272,20 @@ class StorageEngine:
             # A proper implementation would involve a page directory or linked list of pages
 
         return last_page
-    
-    def _create_new_page(self, table_name: str) -> Optional[Page]:
-        """创建新页面"""
-        # 从 CatalogPage 获取表的 heap_root_page_id
-        table_metadata = self.catalog_page.get_table_metadata(table_name)
-        heap_root_page_id = table_metadata['heap_root_page_id']
 
-        # 分配一个新的页面
-        new_page = self.buffer_pool.new_page()
-        if new_page:
-            # 实际中，这里需要将新页面链接到表的现有页面链中
-            # For now, we'll just return the new page.
-            pass
-        return new_page
+    # def _create_new_page(self, table_name: str) -> Optional[Page]:
+    #     """创建新页面"""
+    #     # 从 CatalogPage 获取表的 heap_root_page_id
+    #     table_metadata = self.catalog_page.get_table_metadata(table_name)
+    #     heap_root_page_id = table_metadata['heap_root_page_id']
+    #
+    #     # 分配一个新的页面
+    #     new_page = self.buffer_pool.new_page()
+    #     if new_page:
+    #         # 实际中，这里需要将新页面链接到表的现有页面链中
+    #         # For now, we'll just return the new page.
+    #         pass
+    #     return new_page
 
     def _decode_value(self, row_data: bytes, offset: int, col_type: str) -> tuple[Any, int]:
         """根据 schema 解码单个值"""
@@ -285,50 +330,54 @@ class StorageEngine:
             return None
         return self._page_get_row(page, row_id)
 
-    def delete_row(self, table_name: str, pk_value: Any) -> bool:
-        """根据主键删除行数据"""
-        if table_name not in self.indexes:
-            return False
-
-        # Convert pk_value to bytes for B+ tree search
-        schema = self.catalog.get_schema(table_name)
-        pk_col_name, pk_col_type = schema[0]
-
-        if pk_col_type == "INT":
-            pk_bytes = pk_value.to_bytes(4, 'little', signed=True)
-        elif pk_col_type == "TEXT":
-            pk_bytes = pk_value.encode('utf-8')
-        else:
-            raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type}")
-
-        rid_bytes = self.indexes[table_name].search(pk_bytes)
-        if not rid_bytes:
-            return False # Key not found in index
-
-        # Deserialize RID (page_id, row_id) from bytes
-        page_id = int.from_bytes(rid_bytes[0:4], 'little')
-        row_id = int.from_bytes(rid_bytes[4:8], 'little')
-
-        page = self.buffer_pool.fetch_page(page_id)
-        if not page:
-            return False
-
-        # Delete row from page
-        success = self._page_delete_row(page, row_id)
-        if not success:
-            return False
-
-        # Delete from B+ tree index
-        return self.indexes[table_name].delete(pk_bytes)
+    # def delete_row(self, table_name: str, pk_value: Any) -> bool:
+    #     """根据主键删除行数据"""
+    #     if table_name not in self.indexes:
+    #         return False
+    #
+    #     # Convert pk_value to bytes for B+ tree search
+    #     schema = self.catalog.get_schema(table_name)
+    #     pk_col_name, pk_col_type = schema[0]
+    #
+    #     if pk_col_type == "INT":
+    #         pk_bytes = pk_value.to_bytes(4, 'little', signed=True)
+    #     elif pk_col_type == "TEXT":
+    #         pk_bytes = pk_value.encode('utf-8')
+    #     else:
+    #         raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type}")
+    #
+    #     rid_bytes = self.indexes[table_name].search(pk_bytes)
+    #     if not rid_bytes:
+    #         return False # Key not found in index
+    #
+    #     # Deserialize RID (page_id, row_id) from bytes
+    #     page_id = int.from_bytes(rid_bytes[0:4], 'little')
+    #     row_id = int.from_bytes(rid_bytes[4:8], 'little')
+    #
+    #     page = self.buffer_pool.fetch_page(page_id)
+    #     if not page:
+    #         return False
+    #
+    #     # Delete row from page
+    #     success = self._page_delete_row(page, row_id)
+    #     if not success:
+    #         return False
+    #
+    #     # Delete from B+ tree index
+    #     return self.indexes[table_name].delete(pk_bytes)
 
     def update_row(self, table_name: str, pk_value: Any, new_row_data: bytes) -> bool:
-        """根据主键更新行数据"""
-        # TODO: 实现更新逻辑，可能需要先删除旧行，再插入新行，或者直接在页内更新
-        # 考虑到变长数据，直接在页内更新可能比较复杂，通常是删除旧的RID，插入新的RID
-        if table_name not in self.indexes:
+        """更新一行数据"""
+        # 1. 获取表的元数据和索引
+        table_metadata = self.catalog_page.get_table_metadata(table_name)
+        if not table_metadata:
             return False
 
-        # Convert pk_value to bytes for B+ tree search
+        if table_name not in self.indexes:
+            index_root_page_id = table_metadata['index_root_page_id']
+            self.indexes[table_name] = BPlusTree(self.buffer_pool, index_root_page_id)
+
+        # 2. 根据主键查找旧记录的 RID (page_id, row_id)
         schema = self.catalog.get_schema(table_name)
         pk_col_name, pk_col_type = schema[0]
 
@@ -341,28 +390,31 @@ class StorageEngine:
 
         rid_bytes = self.indexes[table_name].search(pk_bytes)
         if not rid_bytes:
-            return False # Key not found in index
+            return False # 旧记录不存在
 
-        # Deserialize RID (page_id, row_id) from bytes
-        page_id = int.from_bytes(rid_bytes[0:4], 'little')
-        row_id = int.from_bytes(rid_bytes[4:8], 'little')
+        old_page_id = int.from_bytes(rid_bytes[0:4], 'little')
+        old_row_id = int.from_bytes(rid_bytes[4:8], 'little')
 
-        page = self.buffer_pool.fetch_page(page_id)
-        if not page:
+        # 3. 获取旧记录所在的页面
+        old_page = self.buffer_pool.fetch_page(old_page_id)
+        if not old_page:
             return False
 
-        # For update, we'll delete the old row and insert the new one.
-        # This simplifies handling variable-length data and ensures data integrity.
-        # First, delete the old row from the page.
-        delete_success = page.delete_row(row_id)
-        if not delete_success:
+        # 4. 尝试原地更新
+        old_row_offset, old_row_length = self._page_get_row_info(old_page, old_row_id)
+        if old_row_offset is not None and self._page_update_row_in_place(old_page, old_row_offset, new_row_data):
+            self.buffer_pool.unpin_page(old_page_id, True) # Mark page dirty
+            return True # 原地更新成功
+
+        # 5. 如果无法原地更新（新数据太大），则执行删除旧记录并插入新记录的逻辑
+        # 删除旧记录
+        old_row_data_retrieved = self._page_delete_row(old_page, old_row_id)
+        if not old_row_data_retrieved:
+            self.buffer_pool.unpin_page(old_page_id, False)
             return False
+        self.buffer_pool.unpin_page(old_page_id, True) # Mark old page as dirty
 
-        # Then, delete the old entry from the B+ tree.
-        self.indexes[table_name].delete(pk_bytes)
-
-        # Now, insert the new row data.
-        # This will create a new RID and update the B+ tree with the new RID.
+        # 插入新记录 (这会处理页面空间和 TableHeapPage 更新，并更新 B+ 树)
         return self.insert_row(table_name, new_row_data)
 
     # --- 页面内部数据管理辅助方法 ---
@@ -437,6 +489,37 @@ class StorageEngine:
         except IndexError:
             return None  # 数据越界
 
+    def _page_update_row_in_place(self, page: Page, row_offset: int, new_row_data: bytes) -> bool:
+        """在页面中原地更新一行数据，如果新数据大小超过旧数据，则返回 False"""
+        if row_offset < self.PAGE_HEADER_SIZE or row_offset >= len(page.data):
+            return False  # 偏移量无效或在头部区域
+
+        try:
+            # 读取旧行长度
+            old_row_length = int.from_bytes(page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE], 'little')
+            old_data_start_offset = row_offset + self.ROW_LENGTH_PREFIX_SIZE
+
+            # 如果新数据比旧数据长，则无法原地更新
+            if len(new_row_data) > old_row_length:
+                return False
+
+            # 写入新行长度 (如果新旧长度不同，需要更新长度前缀)
+            # 即使新数据短，也写入新数据的实际长度，而不是旧数据的长度
+            page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE] = len(new_row_data).to_bytes(self.ROW_LENGTH_PREFIX_SIZE, 'little')
+
+            # 写入新行数据
+            page.data[old_data_start_offset : old_data_start_offset + len(new_row_data)] = new_row_data
+
+            # 如果新数据比旧数据短，将剩余空间填充为零，以避免脏数据
+            if len(new_row_data) < old_row_length:
+                padding_start = old_data_start_offset + len(new_row_data)
+                padding_end = old_data_start_offset + old_row_length
+                page.data[padding_start:padding_end] = b'\x00' * (old_row_length - len(new_row_data))
+
+            return True
+        except IndexError:
+            return False  # 数据越界
+
     def _page_delete_row(self, page: Page, row_offset: int) -> bool:
         """从页面中删除指定偏移量的行数据"""
         # 简单的删除：将行数据标记为已删除（例如，将长度设为0）
@@ -448,7 +531,7 @@ class StorageEngine:
         try:
             # 读取行长度
             row_length = int.from_bytes(page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE], 'little')
-            
+
             # 将长度标记为0，表示删除
             page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(self.ROW_LENGTH_PREFIX_SIZE, 'little')
             # 清空数据（可选，但有助于调试和避免数据泄露）
