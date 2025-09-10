@@ -4,11 +4,13 @@
 import unittest
 from engine.operators.seq_scan import SeqScanOperator
 from engine.storage_engine import StorageEngine
+from engine.Catelog.catelog import Catalog
 
 class TestSeqScan(unittest.TestCase):
     """顺序扫描算子测试"""
     def setUp(self):
-        self.storage_engine = StorageEngine()
+        self.catalog = Catalog()
+        self.storage_engine = StorageEngine(self.catalog)
         
     def test_empty_table_scan(self):
         """测试空表扫描"""
