@@ -40,20 +40,23 @@ class Lexer:
         'UPDATE', 'SET', 'DELETE', 'VALUES', 'INT', 'FLOAT', 'STRING',
         'BOOL', 'PRIMARY', 'KEY', 'AND', 'OR', 'NOT', 'ORDER', 'BY',
 
-        # 事务控制
+        # 事务控制关键字
         'BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'SET', 'TRANSACTION',
 
-        # 并发控制
-        'LOCK', 'UNLOCK', 'SHARE', 'EXCLUSIVE',
+        # 并发控制关键字
+        'LOCK', 'UNLOCK', 'SHARE', 'EXCLUSIVE', 'CONCURRENTLY',
 
-        # 索引管理
-        'INDEX', 'UNIQUE', 'FULLTEXT', 'BTREE', 'HASH',
+        # 索引关键字
+        'INDEX', 'USING', 'BTREE', 'HASH',
 
-        # 查询优化
-        'EXPLAIN', 'ANALYZE', 'PLAN',
+        # 查询优化关键字
+        'EXPLAIN', 'ANALYZE',
 
-        # 访问控制
-        'GRANT', 'REVOKE', 'ROLE', 'USER', 'PRIVILEGES'
+        # 权限管理关键字
+        'GRANT', 'REVOKE', 'ROLE', 'USER', 'PRIVILEGES',
+
+        # 其他通用关键字
+        'IF', 'EXISTS', 'NO', 'WAIT'
     }
 
     OPERATORS = {
@@ -96,6 +99,7 @@ class Lexer:
         return self.tokens
 
     def _skip_whitespace(self) -> bool:
+        """跳过空白字符"""
         if self.pos >= len(self.sql):
             return False
 
@@ -107,10 +111,11 @@ class Lexer:
                 self.column += 1
             self.pos += 1
             return True
+
         return False
 
     def _skip_comments(self) -> bool:
-        """支持 '--' 单行注释 和 '/* ... */' 多行注释"""
+        """支持 '--' 单行注释和 '/* ... */' 多行注释"""
         if self.pos >= len(self.sql):
             return False
 
@@ -142,6 +147,7 @@ class Lexer:
         return False
 
     def _match_string(self) -> Optional[Token]:
+        """匹配字符串字面量"""
         if self.pos >= len(self.sql) or self.sql[self.pos] != "'":
             return None
         start_line, start_column = self.line, self.column
@@ -166,6 +172,7 @@ class Lexer:
         return Token(TokenType.STRING, value, start_line, start_column)
 
     def _match_number(self) -> Optional[Token]:
+        """匹配数字"""
         if self.pos >= len(self.sql) or not self.sql[self.pos].isdigit():
             return None
         start_line, start_column = self.line, self.column
@@ -183,10 +190,10 @@ class Lexer:
         return Token(TokenType.NUMBER, value, start_line, start_column)
 
     def _match_operator(self) -> Optional[Token]:
+        """匹配运算符"""
         if self.pos >= len(self.sql):
             return None
-        # 支持多字符运算符
-        for op_len in (2, 1):
+        for op_len in (2, 1):  # 支持多字符运算符，如 `!=`
             candidate = self.sql[self.pos:self.pos + op_len]
             if candidate in self.OPERATORS:
                 token = Token(TokenType.OPERATOR, candidate, self.line, self.column)
@@ -196,6 +203,7 @@ class Lexer:
         return None
 
     def _match_punctuation(self) -> Optional[Token]:
+        """匹配标点符号"""
         if self.pos >= len(self.sql) or self.sql[self.pos] not in self.PUNCTUATIONS:
             return None
         char = self.sql[self.pos]
@@ -205,6 +213,7 @@ class Lexer:
         return token
 
     def _match_identifier_or_keyword(self) -> Optional[Token]:
+        """匹配标识符或关键字"""
         if self.pos >= len(self.sql) or not (self.sql[self.pos].isalpha() or self.sql[self.pos] == '_'):
             return None
         start_line, start_column = self.line, self.column

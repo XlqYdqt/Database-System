@@ -97,13 +97,15 @@ class Rollback(LogicalPlan):
 
 
 class CreateIndex(LogicalPlan):
-    def __init__(self, table_name: str, index_name: str, columns: List[str]):
+    def __init__(self, table_name: str, index_name: str, columns: List[str], index_type: Optional[IndexType] = None):
         self.table_name = table_name
         self.index_name = index_name
         self.columns = columns
+        self.index_type = index_type
 
     def __repr__(self):
-        return f"CreateIndex(table={self.table_name}, index={self.index_name}, columns={self.columns})"
+        return (f"CreateIndex(table={self.table_name}, index={self.index_name}, columns={self.columns}, "
+                f"index_type={self.index_type})")
 
 
 class DropIndex(LogicalPlan):
@@ -115,31 +117,36 @@ class DropIndex(LogicalPlan):
 
 
 class Grant(LogicalPlan):
-    def __init__(self, privileges: List[str], table_name: str, grantee: str):
+    def __init__(self, privileges: List[str], grantees: List[str], object_type: ObjectType, object_name: str):
         self.privileges = privileges
-        self.table_name = table_name
-        self.grantee = grantee
+        self.grantees = grantees
+        self.object_type = object_type
+        self.object_name = object_name
 
     def __repr__(self):
-        return f"Grant(privileges={self.privileges}, table={self.table_name}, to={self.grantee})"
+        return (f"Grant(privileges={self.privileges}, object_type={self.object_type}, "
+                f"object={self.object_name}, to={self.grantees})")
 
 
 class Revoke(LogicalPlan):
-    def __init__(self, privileges: List[str], table_name: str, grantee: str):
+    def __init__(self, privileges: List[str], grantees: List[str], object_type: ObjectType, object_name: str):
         self.privileges = privileges
-        self.table_name = table_name
-        self.grantee = grantee
+        self.grantees = grantees
+        self.object_type = object_type
+        self.object_name = object_name
 
     def __repr__(self):
-        return f"Revoke(privileges={self.privileges}, table={self.table_name}, from={self.grantee})"
+        return (f"Revoke(privileges={self.privileges}, object_type={self.object_type}, "
+                f"object={self.object_name}, from={self.grantees})")
 
 
 class Explain(LogicalPlan):
-    def __init__(self, child: LogicalPlan):
+    def __init__(self, child: LogicalPlan, options: Optional[Set[ExplainOption]] = None):
         self.child = child
+        self.options = options
 
     def __repr__(self):
-        return f"Explain({self.child})"
+        return f"Explain({self.child}, options={self.options})"
 
 
 class Planner:
@@ -156,22 +163,18 @@ class Planner:
             return self.plan_update(statement)
         elif isinstance(statement, DeleteStatement):
             return self.plan_delete(statement)
-        elif isinstance(statement, BeginStatement):
-            return Begin()
-        elif isinstance(statement, CommitStatement):
-            return Commit()
-        elif isinstance(statement, RollbackStatement):
-            return Rollback()
+        elif isinstance(statement, TransactionStatement):
+            return self.plan_transaction(statement)
         elif isinstance(statement, CreateIndexStatement):
-            return CreateIndex(statement.table_name, statement.index_name, statement.columns)
+            return self.plan_create_index(statement)
         elif isinstance(statement, DropIndexStatement):
-            return DropIndex(statement.index_name)
+            return self.plan_drop_index(statement)
         elif isinstance(statement, GrantStatement):
-            return Grant(statement.privileges, statement.table_name, statement.grantee)
+            return self.plan_grant(statement)
         elif isinstance(statement, RevokeStatement):
-            return Revoke(statement.privileges, statement.table_name, statement.grantee)
+            return self.plan_revoke(statement)
         elif isinstance(statement, ExplainStatement):
-            return Explain(self.plan(statement.inner_statement))
+            return self.plan_explain(statement)
         else:
             raise ValueError(f"不支持的语句类型: {type(statement).__name__}")
 
@@ -193,3 +196,29 @@ class Planner:
 
     def plan_delete(self, statement: DeleteStatement) -> Delete:
         return Delete(statement.table_name, statement.where)
+
+    def plan_transaction(self, statement: TransactionStatement) -> LogicalPlan:
+        if statement.command == TransactionCommand.BEGIN:
+            return Begin()
+        elif statement.command == TransactionCommand.COMMIT:
+            return Commit()
+        elif statement.command == TransactionCommand.ROLLBACK:
+            return Rollback()
+        else:
+            raise ValueError(f"不支持的事务命令: {statement.command}")
+
+    def plan_create_index(self, statement: CreateIndexStatement) -> CreateIndex:
+        return CreateIndex(statement.table_name, statement.index_name, statement.columns, index_type=statement.index_type)
+
+    def plan_drop_index(self, statement: DropIndexStatement) -> DropIndex:
+        return DropIndex(statement.index_name)
+
+    def plan_grant(self, statement: GrantStatement) -> Grant:
+        return Grant(statement.privileges, statement.grantees, statement.object_type, statement.object_name)
+
+    def plan_revoke(self, statement: RevokeStatement) -> Revoke:
+        return Revoke(statement.privileges, statement.grantees, statement.object_type, statement.object_name)
+
+    def plan_explain(self, statement: ExplainStatement) -> Explain:
+        return Explain(self.plan(statement.statement), options=statement.options)
+
