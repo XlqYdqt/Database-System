@@ -14,18 +14,19 @@ class SemanticError(Exception):
 
 
 class SemanticAnalyzer:
-    """语义分析器"""
+    """语义分析器，用于分析SQL语句的语义正确性"""
 
     def __init__(self):
-        # 存储表元数据：表名 -> 列定义列表
+        # 存储表的元数据：表名 -> 列定义列表
         self.tables: Dict[str, List[ColumnDefinition]] = {}
-        # 存储索引元数据：表名 -> 索引元信息
+        # 存储索引的元数据：表名 -> 索引定义列表
         self.indexes: Dict[str, List[CreateIndexStatement]] = {}
-        # 存储角色的权限：角色名 -> 权限列表
+        # 存储角色的权限信息：角色名 -> 授权信息列表
         self.roles: Dict[str, List[GrantStatement]] = {}
 
     def analyze(self, statement: Statement) -> Statement:
-        """分析语句的语义正确性"""
+        """分析单条SQL语句的语义正确性"""
+        # 根据SQL语句类型调用对应的分析方法
         if isinstance(statement, CreateTableStatement):
             return self.analyze_create_table(statement)
         elif isinstance(statement, InsertStatement):
@@ -47,8 +48,6 @@ class SemanticAnalyzer:
         else:
             raise SemanticError(f"不支持的语句类型: {type(statement).__name__}")
 
-    # -------------------- 原有方法 --------------------
-
     def analyze_create_table(self, statement: CreateTableStatement) -> CreateTableStatement:
         """分析CREATE TABLE语句"""
         table_name = statement.table_name
@@ -67,15 +66,16 @@ class SemanticAnalyzer:
                 raise SemanticError(f"列名 '{column.name}' 重复")
             column_names.add(column.name)
 
-            # 统计主键数量
-            if column.is_primary:
-                primary_key_count += 1
+            # 检查主键约束数量
+            for constraint, _ in column.constraints:
+                if constraint == ColumnConstraint.PRIMARY_KEY:
+                    primary_key_count += 1
 
-        # 检查主键数量（目前只支持单个主键）
+        # 检查主键约束数量是否符合规则
         if primary_key_count > 1:
             raise SemanticError("目前只支持单个主键")
 
-        # 保存表元数据
+        # 保存表的元数据
         self.tables[table_name] = statement.columns
 
         return statement
@@ -84,36 +84,33 @@ class SemanticAnalyzer:
         """分析INSERT语句"""
         table_name = statement.table_name
 
-        # 检查表是否存在
+        # 检查目标表是否存在
         if table_name not in self.tables:
             raise SemanticError(f"表 '{table_name}' 不存在")
 
         table_columns = self.tables[table_name]
 
-        # 如果指定了列列表，检查列是否存在
+        # 检查列名是否存在
         if statement.columns:
             for column_name in statement.columns:
                 if not any(col.name == column_name for col in table_columns):
                     raise SemanticError(f"列 '{column_name}' 在表 '{table_name}' 中不存在")
         else:
-            # 如果没有指定列，使用所有列
+            # 没有指定列名时，默认使用所有列
             statement.columns = [col.name for col in table_columns]
 
-        # 检查值数量是否匹配列数量
+        # 检查插入值数量是否与列数量一致
         if len(statement.values) != len(statement.columns):
             raise SemanticError(f"值数量({len(statement.values)})与列数量({len(statement.columns)})不匹配")
 
         # 检查值类型是否匹配列类型
-        for i, (value, column_name) in enumerate(zip(statement.values, statement.columns)):
-            # 查找列定义
+        for value, column_name in zip(statement.values, statement.columns):
             column_def = next((col for col in table_columns if col.name == column_name), None)
             if not column_def:
-                continue  # 这应该不会发生，因为前面已经检查过了
+                raise SemanticError(f"列 '{column_name}' 不存在")
 
-            # 检查类型匹配
             if not self._check_type_compatibility(value, column_def.data_type):
-                raise SemanticError(
-                    f"值 '{value}' 的类型与列 '{column_name}' 的类型 {column_def.data_type.value} 不匹配")
+                raise SemanticError(f"值 '{value}' 的类型与列 '{column_name}' 的类型不匹配")
 
         return statement
 
@@ -127,15 +124,15 @@ class SemanticAnalyzer:
 
         table_columns = self.tables[table_name]
 
-        # 检查选择列表中的列
+        # 检查选择的列是否存在
         for column_expr in statement.columns:
             self._check_column_expression(column_expr, table_name, table_columns)
 
-        # 检查WHERE子句中的表达式
+        # 检查WHERE条件中的表达式
         if statement.where:
             self._check_expression(statement.where, table_name, table_columns)
 
-        # 检查ORDER BY子句中的列
+        # 检查ORDER BY中的列是否存在
         for column in statement.order_by:
             self._check_column_reference(column, table_name, table_columns)
 
@@ -145,27 +142,22 @@ class SemanticAnalyzer:
         """分析UPDATE语句"""
         table_name = statement.table_name
 
-        # 检查表是否存在
+        # 检查目标表是否存在
         if table_name not in self.tables:
             raise SemanticError(f"表 '{table_name}' 不存在")
 
         table_columns = self.tables[table_name]
 
-        # 检查赋值语句中的列
+        # 检查赋值操作是否合法
         for column_name, expression in statement.assignments.items():
-            # 检查列是否存在
             if not any(col.name == column_name for col in table_columns):
                 raise SemanticError(f"列 '{column_name}' 在表 '{table_name}' 中不存在")
 
-            # 检查表达式
-            self._check_expression(expression, table_name, table_columns)
-
-            # 检查类型兼容性
             column_def = next(col for col in table_columns if col.name == column_name)
             if not self._check_type_compatibility(expression, column_def.data_type):
-                raise SemanticError(f"表达式类型与列 '{column_name}' 的类型 {column_def.data_type.value} 不匹配")
+                raise SemanticError(f"表达式类型与列 '{column_name}' 的类型不匹配")
 
-        # 检查WHERE子句中的表达式
+        # 检查WHERE条件中的表达式
         if statement.where:
             self._check_expression(statement.where, table_name, table_columns)
 
@@ -175,13 +167,13 @@ class SemanticAnalyzer:
         """分析DELETE语句"""
         table_name = statement.table_name
 
-        # 检查表是否存在
+        # 检查目标表是否存在
         if table_name not in self.tables:
             raise SemanticError(f"表 '{table_name}' 不存在")
 
         table_columns = self.tables[table_name]
 
-        # 检查WHERE子句中的表达式
+        # 检查WHERE条件是否正确
         if statement.where:
             self._check_expression(statement.where, table_name, table_columns)
 
@@ -191,22 +183,22 @@ class SemanticAnalyzer:
         """分析CREATE INDEX语句"""
         table_name = statement.table_name
 
-        # 检查表是否存在
+        # 检查目标表是否存在
         if table_name not in self.tables:
             raise SemanticError(f"表 '{table_name}' 不存在")
 
         table_columns = self.tables[table_name]
 
-        # 检查索引列是否存在
+        # 检查索引的列是否存在
         for column_name in statement.columns:
             if not any(col.name == column_name for col in table_columns):
                 raise SemanticError(f"列 '{column_name}' 不存在于表 '{table_name}' 中")
 
-        # 检查索引是否已有重复
+        # 检查索引是否重复定义
         if table_name in self.indexes and any(idx.index_name == statement.index_name for idx in self.indexes[table_name]):
-            raise SemanticError(f"索引 '{statement.index_name}' 在表 '{table_name}' 上已存在")
+            raise SemanticError(f"索引 '{statement.index_name}' 已存在")
 
-        # 添加索引元数据
+        # 保存索引元数据
         if table_name not in self.indexes:
             self.indexes[table_name] = []
         self.indexes[table_name].append(statement)
@@ -215,71 +207,50 @@ class SemanticAnalyzer:
 
     def analyze_grant(self, statement: GrantStatement) -> GrantStatement:
         """分析GRANT语句"""
-        role_name = statement.grantees[0]
-
-        # 检查被授予的权限是否无效
+        # 检查权限的合法性
         for privilege in statement.privileges:
             if privilege not in Privilege:
                 raise SemanticError(f"无效的权限类型: {privilege.name}")
 
-        # 更新角色权限元数据
-        self.roles.setdefault(role_name, []).append(statement)
+        # 更新角色权限信息
+        for grantee in statement.grantees:
+            self.roles.setdefault(grantee, []).append(statement)
 
         return statement
 
     def analyze_revoke(self, statement: RevokeStatement) -> RevokeStatement:
         """分析REVOKE语句"""
-        role_name = statement.grantees[0]
-
         # 检查被撤销权限的有效性
-        if role_name not in self.roles:
-            raise SemanticError(f"角色 '{role_name}' 不存在或没有相关权限")
+        for grantee in statement.grantees:
+            if grantee not in self.roles:
+                raise SemanticError(f"角色 '{grantee}' 不存在或没有相关权限")
 
-        # 在权限中逐一移除
-        current_roles = self.roles[role_name]
-        for privilege in statement.privileges:
-            current_roles = [grant for grant in current_roles if privilege not in grant.privileges]
-
-        self.roles[role_name] = current_roles
         return statement
 
     def analyze_transaction(self, statement: TransactionStatement) -> TransactionStatement:
-        """分析事务语句"""
-        # 针对事务控制的语义检查
+        """分析事务控制语句"""
         if statement.command not in TransactionCommand:
             raise SemanticError(f"不支持的事务操作: {statement.command}")
+
         return statement
 
-    # -------------------- 私有方法 --------------------
-
     def _check_column_expression(self, expr: Expression, table_name: str, table_columns: List[ColumnDefinition]):
-        """检查列表达式"""
+        """检查选择列表达式是否正确"""
         if isinstance(expr, Column):
             self._check_column_reference(expr, table_name, table_columns)
-        elif isinstance(expr, BinaryExpression):
-            self._check_expression(expr, table_name, table_columns)
 
     def _check_expression(self, expr: Expression, table_name: str, table_columns: List[ColumnDefinition]):
-        """检查表达式"""
+        """检查表达式是否合法"""
         if isinstance(expr, Column):
             self._check_column_reference(expr, table_name, table_columns)
-        elif isinstance(expr, Literal):
-            pass  # 字面量不需要检查
-        elif isinstance(expr, BinaryExpression):
-            self._check_expression(expr.left, table_name, table_columns)
-            self._check_expression(expr.right, table_name, table_columns)
 
     def _check_column_reference(self, column: Column, table_name: str, table_columns: List[ColumnDefinition]):
-        """检查列引用"""
+        """检查列引用是否存在"""
         if column.name != '*' and not any(col.name == column.name for col in table_columns):
             raise SemanticError(f"列 '{column.name}' 不存在于表 '{table_name}' 中")
 
     def _check_type_compatibility(self, expr: Expression, expected_type: DataType) -> bool:
-        """检查表达式类型是否与期望类型兼容"""
+        """检查表达式类型是否与预期类型兼容"""
         if isinstance(expr, Literal):
             return expr.data_type == expected_type
-        elif isinstance(expr, Column):
-            return True
-        elif isinstance(expr, BinaryExpression):
-            return True
-        return False
+        return True

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
 from .lexer import Token, TokenType, Lexer
 from .ast import *
 
@@ -47,7 +47,10 @@ class Parser:
         raise SyntaxError(f"不支持的语句类型: {self.current_token.value}")
 
     def next_token_is(self, token_type: TokenType, token_value: str) -> bool:
-        return self.pos < len(self.tokens) - 1 and self.tokens[self.pos + 1].type == token_type and self.tokens[self.pos + 1].value == token_value
+        """检查下一个Token是否为期望的类型和值"""
+        return (self.pos < len(self.tokens) - 1 and
+                self.tokens[self.pos + 1].type == token_type and
+                self.tokens[self.pos + 1].value == token_value)
 
     def _advance(self, expected_type: Optional[TokenType] = None, expected_value: Optional[str] = None):
         """前进到下一个Token，可选的类型和值检查"""
@@ -100,14 +103,11 @@ class Parser:
             except ValueError:
                 raise SyntaxError(f"不支持的数据类型: {data_type_str}")
 
-            is_primary = False
+            # 初始化constraints
+            constraints = []
             if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'PRIMARY':
                 self._advance()
                 self._expect(TokenType.KEYWORD, 'KEY')
-                is_primary = True
-
-            constraints = []
-            if is_primary:
                 constraints.append((ColumnConstraint.PRIMARY_KEY, None))
 
             columns.append(ColumnDefinition(column_name, data_type, constraints))
@@ -197,7 +197,8 @@ class Parser:
         columns = []
 
         while self.current_token and self.current_token.type != TokenType.KEYWORD and self.current_token.value != 'FROM':
-            if self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == '*':
+            # 检查通配符 *
+            if self.current_token.type == TokenType.OPERATOR and self.current_token.value == '*':  # 此处区别点在 `TokenType.OPERATOR` 而不是 `TokenType.WILDCARD`
                 columns.append(Column('*'))
                 self._advance()
             else:
@@ -356,16 +357,16 @@ class Parser:
         """解析CREATE INDEX语句"""
         self._expect(TokenType.KEYWORD, 'CREATE')
         self._expect(TokenType.KEYWORD, 'INDEX')
-        
+
         index_name = self._expect(TokenType.IDENTIFIER).value
         self._expect(TokenType.KEYWORD, 'ON')
-        
+
         table_name = self._expect(TokenType.IDENTIFIER).value
         self._expect(TokenType.PUNCTUATION, '(')
-        
+
         columns = self.parse_column_list()
         self._expect(TokenType.PUNCTUATION, ')')
-        
+
         index_type = None
         if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'USING':
             self._advance()
@@ -374,19 +375,19 @@ class Parser:
                 index_type = IndexType(index_type_str)
             except ValueError:
                 raise SyntaxError(f"不支持的索引类型: {index_type_str}")
-        
+
         concurrently = False
         if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'CONCURRENTLY':
             concurrently = True
             self._advance()
-        
+
         if_not_exists = False
         if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'IF':
             self._advance()
             self._expect(TokenType.KEYWORD, 'NOT')
             self._expect(TokenType.KEYWORD, 'EXISTS')
             if_not_exists = True
-        
+
         where_clause = None
         if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'WHERE':
             self._advance()
@@ -404,7 +405,7 @@ class Parser:
             command = TransactionCommand(command_str)
         except ValueError:
             raise SyntaxError(f"不支持的事务命令: {command_str}")
-        
+
         isolation_level = None
         if command == TransactionCommand.SET_TRANSACTION:
             if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'ISOLATION':
@@ -428,25 +429,38 @@ class Parser:
     def parse_grant(self) -> GrantStatement:
         """解析GRANT权限授予语句"""
         self._expect(TokenType.KEYWORD, 'GRANT')
+
+        # 解析权限列表
         privileges = [Privilege(self._expect(TokenType.KEYWORD).value)]
         while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
             self._advance()
             privileges.append(Privilege(self._expect(TokenType.KEYWORD).value))
-        
+
         self._expect(TokenType.KEYWORD, 'ON')
-        object_type_str = self._expect(TokenType.KEYWORD).value
-        try:
-            object_type = ObjectType(object_type_str)
-        except ValueError:
-            raise SyntaxError(f"不支持的对象类型: {object_type_str}")
-        
+
+        # 尝试解析 object_type，如果未显式提供，则默认为 TABLE
+        object_type = None
+        if self.current_token.type == TokenType.KEYWORD:
+            object_type_str = self._expect(TokenType.KEYWORD).value
+            try:
+                object_type = ObjectType(object_type_str.upper())
+            except ValueError:
+                raise SyntaxError(f"不支持的对象类型: {object_type_str}")
+        else:
+            object_type = ObjectType.TABLE  # 默认为 TABLE
+
+        # 解析对象名称
         object_name = self._expect(TokenType.IDENTIFIER).value
+
         self._expect(TokenType.KEYWORD, 'TO')
+
+        # 解析 grantees 列表
         grantees = [self._expect(TokenType.IDENTIFIER).value]
         while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
             self._advance()
             grantees.append(self._expect(TokenType.IDENTIFIER).value)
 
+        # 检查是否包含 WITH GRANT OPTION
         with_grant_option = False
         if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'WITH':
             self._advance()
@@ -454,16 +468,19 @@ class Parser:
             self._expect(TokenType.KEYWORD, 'OPTION')
             with_grant_option = True
 
+        # 解析结束符号
         if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
             self._advance()
 
-        return GrantStatement(privileges, object_type, object_name, grantees, with_grant_option=with_grant_option)
+        # 传递所有参数创建 GrantStatement
+        return GrantStatement(privileges=privileges, object_type=object_type, object_name=object_name,
+                              grantees=grantees, with_grant_option=with_grant_option)
 
     def parse_lock(self) -> LockStatement:
         """解析LOCK语句"""
         self._expect(TokenType.KEYWORD, 'LOCK')
         self._expect(TokenType.KEYWORD, 'TABLE')
-        
+
         table_names = [self._expect(TokenType.IDENTIFIER).value]
         while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
             self._advance()
@@ -504,18 +521,15 @@ class Parser:
                 if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
                     self._advance()
             self._expect(TokenType.PUNCTUATION, ')')
-        
+
         format = None
         if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'FORMAT':
             self._advance()
             format = self._expect(TokenType.KEYWORD).value
 
         statement = self.parse()
-        
+
         if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
             self._advance()
 
         return ExplainStatement(statement, options=options, format=format)
-
-
-

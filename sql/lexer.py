@@ -1,8 +1,3 @@
-"""
-增强版 SQL 词法分析器
-支持事务、并发控制、索引、优化、权限管理等关键字
-"""
-
 import re
 from typing import List, Optional
 from enum import Enum
@@ -16,6 +11,7 @@ class TokenType(Enum):
     STRING = 'STRING'
     OPERATOR = 'OPERATOR'
     PUNCTUATION = 'PUNCTUATION'
+    WILDCARD = 'WILDCARD'  # 新增通配符
     EOF = 'EOF'
 
 
@@ -47,24 +43,24 @@ class Lexer:
         'LOCK', 'UNLOCK', 'SHARE', 'EXCLUSIVE', 'CONCURRENTLY',
 
         # 索引关键字
-        'INDEX', 'USING', 'BTREE', 'HASH',
+        'INDEX', 'USING', 'BTREE', 'HASH', 'DROP',
 
         # 查询优化关键字
         'EXPLAIN', 'ANALYZE',
 
         # 权限管理关键字
-        'GRANT', 'REVOKE', 'ROLE', 'USER', 'PRIVILEGES',
+        'GRANT', 'REVOKE', 'ROLE', 'USER', 'PRIVILEGES', 'ON', 'TO',
 
-        # 其他通用关键字
+        # 通用关键字
         'IF', 'EXISTS', 'NO', 'WAIT'
     }
 
     OPERATORS = {
-        '=', '!=', '<', '<=', '>', '>=', '+', '-', '*', '/', '%'
+        '!=', '=', '<>', '<', '<=', '>', '>=', '+', '-', '*', '/', '%'
     }
 
     PUNCTUATIONS = {
-        '(', ')', ',', ';', '.'
+        '(', ')', ',', ';', '.', '*'  # '*' 作为通配符处理
     }
 
     def __init__(self, sql: str):
@@ -93,10 +89,14 @@ class Lexer:
                 self.tokens.append(token)
             else:
                 char = self.sql[self.pos]
-                raise SyntaxError(f"[Lexer Error] 无法识别的字符 '{char}' (line {self.line}, column {self.column})")
+                self._raise_lexer_error(f"无法识别的字符 '{char}'")
 
         self.tokens.append(Token(TokenType.EOF, '', self.line, self.column))
         return self.tokens
+
+    def _raise_lexer_error(self, message: str):
+        """统一错误处理"""
+        raise SyntaxError(f"[Lexer Error] {message} (line {self.line}, column {self.column})")
 
     def _skip_whitespace(self) -> bool:
         """跳过空白字符"""
@@ -141,7 +141,7 @@ class Lexer:
                 self.pos += 2
                 self.column += 2
             else:
-                raise SyntaxError("未闭合的多行注释")
+                self._raise_lexer_error("未闭合的多行注释")
             return True
 
         return False
@@ -164,7 +164,7 @@ class Lexer:
             self.pos += 1
 
         if self.pos >= len(self.sql):
-            raise SyntaxError("未闭合的字符串字面量")
+            self._raise_lexer_error("未闭合的字符串字面量")
 
         value = self.sql[start_pos:self.pos]
         self.pos += 1
@@ -207,7 +207,8 @@ class Lexer:
         if self.pos >= len(self.sql) or self.sql[self.pos] not in self.PUNCTUATIONS:
             return None
         char = self.sql[self.pos]
-        token = Token(TokenType.PUNCTUATION, char, self.line, self.column)
+        token_type = TokenType.WILDCARD if char == '*' else TokenType.PUNCTUATION
+        token = Token(token_type, char, self.line, self.column)
         self.pos += 1
         self.column += 1
         return token
@@ -223,6 +224,5 @@ class Lexer:
             self.column += 1
         value = self.sql[start_pos:self.pos]
         upper_value = value.upper()
-        if upper_value in self.KEYWORDS:
-            return Token(TokenType.KEYWORD, upper_value, start_line, start_column)
-        return Token(TokenType.IDENTIFIER, value, start_line, start_column)
+        token_type = TokenType.KEYWORD if upper_value in self.KEYWORDS else TokenType.IDENTIFIER
+        return Token(token_type, value, start_line, start_column)
