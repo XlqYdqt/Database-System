@@ -1,5 +1,6 @@
 import struct
 import bisect
+import threading
 from storage.buffer_pool_manager import BufferPoolManager, Page
 
 
@@ -29,7 +30,6 @@ class BPlusTreePage:
         header_data = struct.pack(self.HEADER_FORMAT, int(self.is_leaf), self.num_keys)
         self.data[:self.HEADER_SIZE] = header_data
 
-    # 其他通用方法，如 is_full(), get_key_at() 等可以根据需要添加
 
 
 class InternalPage(BPlusTreePage):
@@ -232,6 +232,55 @@ class LeafPage(BPlusTreePage):
         self.num_keys = len(self.key_rid_pairs)
 
 
+# --- 并发控制辅助类 ---
+
+class TransactionContext:
+    """
+    用于在单次B+树操作中跟踪和管理所有锁定的页面（Latches）。
+    这确保了即使在操作过程中发生错误，所有获取的锁也能被正确释放。
+    """
+
+    def __init__(self, tree):
+        self.tree = tree
+        # 存储已加锁的页面包装器 (InternalPage or LeafPage)
+        self.latched_pages_wrappers = []
+        self.newly_created_page_ids = set()
+
+    def add_latched_page(self, page_wrapper):
+        self.latched_pages_wrappers.append(page_wrapper)
+
+    def release_all_latches(self, is_dirty_list=None):
+        """释放所有持有的锁并解钉页面。"""
+        # 未提供则默认都不是脏页
+        if is_dirty_list is None:
+            is_dirty_list = [False] * len(self.latched_pages_wrappers)
+
+        for i, wrapper in reversed(list(enumerate(self.latched_pages_wrappers))):
+            page_id = wrapper.page.page_id
+            is_dirty = is_dirty_list[i] if i < len(is_dirty_list) else False
+            self.tree.bpm.unpin_page(page_id, is_dirty)
+            self.tree._release_latch(page_id)
+
+        # 释放新创建页面的锁
+        for page_id in self.newly_created_page_ids:
+            # 它们已经被unpin和标记为dirty，这里只需释放锁
+            self.tree._release_latch(page_id)
+
+        self.latched_pages_wrappers.clear()
+        self.newly_created_page_ids.clear()
+
+    def release_ancestors_latches(self):
+        """
+        实现锁耦合（Latch Crabbing）的关键。
+        当发现当前节点是“安全”的时，释放所有祖先节点的锁。
+        """
+        last_page = self.latched_pages_wrappers.pop()
+        # 脏页标记应传递给 release_all_latches
+        # 因为被释放的祖先节点可能已经被修改（如果上层也分裂了）
+        self.release_all_latches(is_dirty_list=[True] * len(self.latched_pages_wrappers))
+        self.latched_pages_wrappers.append(last_page)
+
+
 # --- B+树主类 ---
 class BPlusTree:
     """
@@ -241,185 +290,262 @@ class BPlusTree:
     def __init__(self, buffer_pool_manager: BufferPoolManager, root_page_id: int):
         self.bpm = buffer_pool_manager
         self.root_page_id = root_page_id
+        self._manager_lock = threading.Lock()
+        # 存储 page_id -> threading.Lock 的映射
+        self._latch_manager = {}
+
+    def _get_latch(self, page_id: int) -> threading.Lock:
+        """获取或创建一个与page_id关联的锁存器(Latch)。"""
+        with self._manager_lock:
+            if page_id not in self._latch_manager:
+                self._latch_manager[page_id] = threading.Lock()
+            return self._latch_manager[page_id]
+
+    def _acquire_latch(self, page_id: int):
+        """获取页面锁。"""
+        self._get_latch(page_id).acquire()
+
+    def _release_latch(self, page_id: int):
+        """释放页面锁。"""
+        self._get_latch(page_id).release()
+
 
     def search(self, key) -> tuple | None:
-        """从B+树中查找一个键，返回其对应的RID。"""
-        if self.root_page_id is None:
-            return None
-
-        leaf_page_wrapper, _ = self._find_leaf_page(key)
-        if leaf_page_wrapper is None:
-            return None
-        rid = leaf_page_wrapper.lookup(key)
-
-        self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=False)
-        return rid
-
-    def insert(self, key, rid: tuple)-> bool:
-        """向B+树中插入一个新的 (key, RID) 对。"""
+        """从B+树中查找一个键，返回其对应的RID (线程安全)。"""
         if self.root_page_id is None or self.root_page_id == 0:
-            return self._start_new_tree(key, rid)
+            return None
 
-        leaf_page_wrapper, parent_stack = self._find_leaf_page(key)
-        if leaf_page_wrapper is None:
-            # 这通常意味着页面读取失败，是一个更深层次的错误
-            # 在这里我们选择插入失败
-            return False
-        #检查键是否已经存在
-        if leaf_page_wrapper.lookup(key) is not None:
-            self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=False)
-            return False  # 简单起见，我们不允许重复键
+        current_page_id = self.root_page_id
 
-        leaf_page_wrapper.insert(key, rid)
+        # 使用try...finally确保即使发生异常，锁也能被释放
+        try:
+            self._acquire_latch(current_page_id)
 
-        if not leaf_page_wrapper.is_full():
+            while True:
+                page_obj = self.bpm.fetch_page(current_page_id)
+                if page_obj is None:
+                    # fetch失败，释放当前锁并返回
+                    self._release_latch(current_page_id)
+                    return None
+
+                is_leaf = bool(struct.unpack_from('b', page_obj.data, 0)[0])
+
+                if is_leaf:
+                    leaf_wrapper = LeafPage(page_obj)
+                    rid = leaf_wrapper.lookup(key)
+                    self.bpm.unpin_page(current_page_id, is_dirty=False)
+                    # 这是路径的终点，我们持有锁，所以最后释放
+                    self._release_latch(current_page_id)
+                    return rid
+                else:  # 是内部节点
+                    internal_wrapper = InternalPage(page_obj)
+                    next_page_id = internal_wrapper.lookup(key)
+
+                    # 锁耦合：先获取子节点锁，再释放父节点锁
+                    self._acquire_latch(next_page_id)
+                    parent_page_id = current_page_id
+                    current_page_id = next_page_id
+
+                    # 释放父节点
+                    self.bpm.unpin_page(parent_page_id, is_dirty=False)
+                    self._release_latch(parent_page_id)
+
+        except Exception as e:
+            print(f"Error during search: {e}")
+            # 异常情况下，我们可能仍然持有current_page_id的锁，需要尝试释放
+            # 注意: 这里可能需要更复杂的逻辑来确定锁是否真的被持有，
+            # 但对于简单场景，尝试释放是合理的。
+            try:
+                self._release_latch(current_page_id)
+            except threading.ThreadError:
+                pass  # 锁未被此线程持有
+            return None
+
+    def insert(self, key, rid: tuple) -> bool:
+        """向B+树中插入一个新的 (key, RID) 对 (线程安全)。"""
+        context = TransactionContext(self)
+
+        try:
+            if self.root_page_id is None or self.root_page_id == 0:
+                return self._start_new_tree(key, rid)
+
+            leaf_page_wrapper = self._find_leaf_page_with_latching(key, context)
+
+            if leaf_page_wrapper.lookup(key) is not None:
+                context.release_all_latches()
+                return False  # 不允许重复键
+
+            leaf_page_wrapper.insert(key, rid)
+
+            if not leaf_page_wrapper.is_full():
+                # 叶子节点未满，操作完成
+                context.release_all_latches(is_dirty_list=[True] * len(context.latched_pages_wrappers))
+                return False  # root没有改变
+
+            # --- 节点分裂逻辑 ---
+            # 1. 创建新兄弟节点
+            new_page_obj = self.bpm.new_page()
+            # **关键修正**: 立即为新页面加锁！
+            self._acquire_latch(new_page_obj.page_id)
+            context.newly_created_page_ids.add(new_page_obj.page_id)
+
+            new_leaf_wrapper = LeafPage(new_page_obj)
+
+            # 2. 移动一半数据
+            mid_idx = len(leaf_page_wrapper.key_rid_pairs) // 2
+            new_leaf_wrapper.key_rid_pairs = leaf_page_wrapper.key_rid_pairs[mid_idx:]
+            leaf_page_wrapper.key_rid_pairs = leaf_page_wrapper.key_rid_pairs[:mid_idx]
+
+            # 3. 更新键数量和兄弟指针
+            leaf_page_wrapper.num_keys = len(leaf_page_wrapper.key_rid_pairs)
+            new_leaf_wrapper.num_keys = len(new_leaf_wrapper.key_rid_pairs)
+            new_leaf_wrapper.next_page_id = leaf_page_wrapper.next_page_id
+            new_leaf_wrapper.prev_page_id = leaf_page_wrapper.page.page_id
+            leaf_page_wrapper.next_page_id = new_leaf_wrapper.page.page_id
+
+            if new_leaf_wrapper.next_page_id != 0:
+                # 获取原始的右兄弟节点
+                self._acquire_latch(new_leaf_wrapper.next_page_id)
+                next_sibling_page_obj = self.bpm.fetch_page(new_leaf_wrapper.next_page_id)
+
+                # 把它也加入到事务上下文中，以确保锁能被正确释放
+                # 注意：这里我们只是为了修改它，所以用一个临时的包装器
+                next_sibling_wrapper = LeafPage(next_sibling_page_obj)
+                context.add_latched_page(next_sibling_wrapper)  # 确保锁被管理
+
+                # 更新它的前向指针
+                next_sibling_wrapper.prev_page_id = new_leaf_wrapper.page.page_id
+                next_sibling_wrapper.serialize()
+
+
             leaf_page_wrapper.serialize()
-            self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=True)
+            new_leaf_wrapper.serialize()
+
+            middle_key = new_leaf_wrapper.key_rid_pairs[0][0]
+
+            # 5. 将中间键插入父节点
+            root_changed = self._insert_into_parent(middle_key, new_leaf_wrapper.page.page_id, context)
+
+            # 标记所有涉及的页面为脏页
+            dirty_flags = [True] * len(context.latched_pages_wrappers)
+            # **修正**: 新页面在unpin时也必须标记为dirty
+            self.bpm.unpin_page(new_leaf_wrapper.page.page_id, is_dirty=True)
+
+            context.release_all_latches(dirty_flags)
+            return root_changed
+
+        except Exception as e:
+            print(f"Error during insert: {e}")
+            context.release_all_latches()  # 确保异常时释放所有锁
             return False
-
-        # --- 节点分裂逻辑 ---
-        # 1. 创建新兄弟节点
-        new_page_obj = self.bpm.new_page()
-        new_leaf_wrapper = LeafPage(new_page_obj)
-
-        # 2. 移动一半数据
-        mid_idx = len(leaf_page_wrapper.key_rid_pairs) // 2
-        new_leaf_wrapper.key_rid_pairs = leaf_page_wrapper.key_rid_pairs[mid_idx:]
-        leaf_page_wrapper.key_rid_pairs = leaf_page_wrapper.key_rid_pairs[:mid_idx]
-
-        # 更新键数量
-        leaf_page_wrapper.num_keys = len(leaf_page_wrapper.key_rid_pairs)
-        new_leaf_wrapper.num_keys = len(new_leaf_wrapper.key_rid_pairs)
-        # 3. 更新兄弟指针
-        original_next_pid = leaf_page_wrapper.next_page_id
-        new_leaf_wrapper.next_page_id = original_next_pid
-        new_leaf_wrapper.prev_page_id = leaf_page_wrapper.page.page_id
-        leaf_page_wrapper.next_page_id = new_leaf_wrapper.page.page_id
-
-        #更新原始下一个兄弟节点的prev指针
-        if original_next_pid != 0:
-            next_page_obj = self.bpm.fetch_page(original_next_pid)
-            next_leaf_wrapper = LeafPage(next_page_obj)
-            next_leaf_wrapper.prev_page_id = new_leaf_wrapper.page.page_id
-            next_leaf_wrapper.serialize()
-            self.bpm.unpin_page(next_leaf_wrapper.page.page_id, is_dirty=True)
-
-        # 4. 获取要推到父节点的中间键
-        middle_key = new_leaf_wrapper.key_rid_pairs[0][0]
-
-        # 5. 序列化两个修改过的叶子节点
-        leaf_page_wrapper.serialize()
-        new_leaf_wrapper.serialize()
-
-        # 6. 将中间键插入父节点
-        root_changed = self._insert_into_parent(leaf_page_wrapper, middle_key, new_leaf_wrapper, parent_stack)
-
-        # 7. 解钉所有相关页面
-        self.bpm.unpin_page(leaf_page_wrapper.page.page_id, is_dirty=True)
-        self.bpm.unpin_page(new_leaf_wrapper.page.page_id, is_dirty=True)
-
-        return root_changed
 
     def delete(self, key):
         """todo（可选任务）从B+树中删除一个键。"""
         pass
 
-    def _find_leaf_page(self, key) -> (LeafPage, list):
+    def _find_leaf_page_with_latching(self, key, context: TransactionContext) -> BPlusTreePage:
         """
-        辅助方法，从根节点开始遍历，找到目标叶子节点。
-        返回: (LeafPage包装器, 父节点ID栈)
+        辅助方法，从根节点开始，使用锁耦合/闩锁爬行协议找到目标叶子节点。
+        返回: 目标叶子节点的包装器 (LeafPage)
         """
-        parent_stack = []
         current_page_id = self.root_page_id
-        if current_page_id is None or current_page_id == 0:
-            return None, []
+        self._acquire_latch(current_page_id)
+        page_obj = self.bpm.fetch_page(current_page_id)
 
-        while True:
-            page_obj = self.bpm.fetch_page(current_page_id)
-            if page_obj is None:  # 页面获取失败
-                # 需要释放之前固定的所有父页面
-                for pid in parent_stack:
-                    self.bpm.unpin_page(pid, is_dirty=False)
-                return None, []
-            # 根据头部第一个字节判断页面类型
-            is_leaf = bool(struct.unpack_from('b', page_obj.data, 0)[0])
+        is_leaf = bool(struct.unpack_from('b', page_obj.data, 0)[0])
+        page_wrapper = LeafPage(page_obj) if is_leaf else InternalPage(page_obj)
+        context.add_latched_page(page_wrapper)
 
-            if is_leaf:
-                return LeafPage(page_obj), parent_stack
+        while not page_wrapper.is_leaf:
+            internal_wrapper = page_wrapper
+            next_page_id = internal_wrapper.lookup(key)
 
-            node = InternalPage(page_obj)
-            parent_stack.append(current_page_id)
-            next_page_id = node.lookup(key)
-            self.bpm.unpin_page(current_page_id, is_dirty=False)
-            current_page_id = next_page_id
+            self._acquire_latch(next_page_id)
+            next_page_obj = self.bpm.fetch_page(next_page_id)
+
+            is_leaf = bool(struct.unpack_from('b', next_page_obj.data, 0)[0])
+            next_page_wrapper = LeafPage(next_page_obj) if is_leaf else InternalPage(next_page_obj)
+
+            # 核心优化：如果子节点是“安全”的（未满），则释放所有祖先锁
+            if not next_page_wrapper.is_full():
+                context.release_ancestors_latches()
+
+            context.add_latched_page(next_page_wrapper)
+            page_wrapper = next_page_wrapper
+
+        return page_wrapper
 
     def _start_new_tree(self, key, rid):
         """当树为空时，创建第一个节点。"""
         page_obj = self.bpm.new_page()
-        self.root_page_id = page_obj.page_id
-        # 注意: root_page_id 已在内存中更新。调用者 (insert方法) 会返回 True，
-        # 上层引擎需要捕获此返回值，并从 self.root_page_id 获取新值以持久化到 Catalog 中。
+        #  即使是新树的根节点，也应该获取锁
+        self._acquire_latch(page_obj.page_id)
+        try:
+            self.root_page_id = page_obj.page_id
 
-        leaf_node = LeafPage(page_obj)
-        leaf_node.insert(key, rid)
-        leaf_node.serialize()
+            leaf_node = LeafPage(page_obj)
+            leaf_node.insert(key, rid)
+            leaf_node.serialize()
 
-        self.bpm.unpin_page(self.root_page_id, is_dirty=True)
+            self.bpm.unpin_page(self.root_page_id, is_dirty=True)
+        finally:
+            # 确保锁被释放
+            self._release_latch(page_obj.page_id)
         return True
 
-    def _insert_into_parent(self, left_child: BPlusTreePage, key, right_child: BPlusTreePage,
-                            parent_stack: list) -> bool:
+    def _insert_into_parent(self, key, right_child_pid: int, context: TransactionContext) -> bool:
         """递归地将分裂产生的键和指针插入到父节点中。"""
-        if not parent_stack:
+        # 此时，所有需要的父节点都已经被加锁并存储在context中
+        # 移除当前叶子/内部节点，留下父节点栈
+        popped_child_wrapper = context.latched_pages_wrappers.pop()
+        left_child_pid = popped_child_wrapper.page.page_id
+
+        if not context.latched_pages_wrappers:
             # 情况1: 左孩子是根节点，需要创建一个新的根
             new_root_page_obj = self.bpm.new_page()
+            # **关键修正**: 为新根节点加锁
+            self._acquire_latch(new_root_page_obj.page_id)
+            context.newly_created_page_ids.add(new_root_page_obj.page_id)
+
             new_root = InternalPage(new_root_page_obj)
             self.root_page_id = new_root.page.page_id
-            # 注意: root_page_id 已在内存中更新。此方法会返回 True，
-            # 最终由顶层 insert 方法将此状态返回给上层引擎，由上层引擎负责持久化。
 
             new_root.keys = [key]
-            new_root.pointers = [left_child.page.page_id, right_child.page.page_id]
+            new_root.pointers = [left_child_pid, right_child_pid]
             new_root.serialize()
 
             self.bpm.unpin_page(self.root_page_id, is_dirty=True)
-            return True
+            return True  # root id changed
 
-        parent_page_id = parent_stack.pop()
-        parent_page_obj = self.bpm.fetch_page(parent_page_id)
-        parent_node = InternalPage(parent_page_obj)
-        parent_node.insert(key, right_child.page.page_id)
+        # 从context获取父节点
+        parent_node = context.latched_pages_wrappers[-1]
+        parent_node.insert(key, right_child_pid)
 
         if not parent_node.is_full():
             parent_node.serialize()
-            self.bpm.unpin_page(parent_page_id, is_dirty=True)
-            return False
+            return False  # root id not changed
 
         # 情况3: 父节点也满了，需要递归分裂
         new_internal_page_obj = self.bpm.new_page()
+        # **关键修正**: 为分裂出的新内部节点加锁
+        self._acquire_latch(new_internal_page_obj.page_id)
+        context.newly_created_page_ids.add(new_internal_page_obj.page_id)
+
         new_internal_node = InternalPage(new_internal_page_obj)
 
         mid_idx = len(parent_node.keys) // 2
         key_to_push_up = parent_node.keys[mid_idx]
 
-        # 将后半部分数据移动到新节点
         new_internal_node.keys = parent_node.keys[mid_idx + 1:]
         new_internal_node.pointers = parent_node.pointers[mid_idx + 1:]
-
-        # 截断旧节点的数据
         parent_node.keys = parent_node.keys[:mid_idx]
         parent_node.pointers = parent_node.pointers[:mid_idx + 1]
 
-        # 分裂后更新两个内部节点的键数量
         parent_node.num_keys = len(parent_node.keys)
         new_internal_node.num_keys = len(new_internal_node.keys)
 
-        # 递归调用，将分裂出的键推到更上一层
-        root_changed = self._insert_into_parent(parent_node, key_to_push_up, new_internal_node, parent_stack)
-
         parent_node.serialize()
         new_internal_node.serialize()
-        self.bpm.unpin_page(parent_page_id, is_dirty=True)
         self.bpm.unpin_page(new_internal_page_obj.page.page_id, is_dirty=True)
 
-        return root_changed
+        return self._insert_into_parent(key_to_push_up, new_internal_page_obj.page.page_id, context)

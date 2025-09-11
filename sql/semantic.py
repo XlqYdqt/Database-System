@@ -1,12 +1,6 @@
-"""
-语义分析器
-检查SQL语句的语义正确性
-"""
-
 from typing import Dict, List, Optional
 from .ast import *
 from .parser import Parser
-
 
 class SemanticError(Exception):
     """语义错误异常"""
@@ -41,10 +35,18 @@ class SemanticAnalyzer:
             return self.analyze_create_index(statement)
         elif isinstance(statement, GrantStatement):
             return self.analyze_grant(statement)
+        elif isinstance(statement, GrantRoleStatement):
+            return self.analyze_grant_role(statement)
         elif isinstance(statement, RevokeStatement):
             return self.analyze_revoke(statement)
         elif isinstance(statement, TransactionStatement):
             return self.analyze_transaction(statement)
+        elif isinstance(statement, ExplainStatement):
+            return self.analyze_explain(statement)
+        elif isinstance(statement, LockStatement):
+            return self.analyze_lock(statement)
+        elif isinstance(statement, CreateRoleStatement):
+            return self.analyze_create_role(statement)
         else:
             raise SemanticError(f"不支持的语句类型: {type(statement).__name__}")
 
@@ -218,6 +220,19 @@ class SemanticAnalyzer:
 
         return statement
 
+    def analyze_grant_role(self, statement: GrantRoleStatement) -> GrantRoleStatement:
+        """分析GRANT ROLE语句"""
+        # 检查要授予的角色是否存在
+        for role in statement.roles:
+            if role not in self.roles:
+                raise SemanticError(f"角色 '{role}' 不存在")
+
+        # 检查被授予者是否存在（这里假设被授予者也需要是已存在的角色）
+        for grantee in statement.grantees:
+            if grantee not in self.roles:
+                raise SemanticError(f"被授予者 '{grantee}' 不存在")
+
+        return statement
     def analyze_revoke(self, statement: RevokeStatement) -> RevokeStatement:
         """分析REVOKE语句"""
         # 检查被撤销权限的有效性
@@ -234,6 +249,39 @@ class SemanticAnalyzer:
 
         return statement
 
+    def analyze_explain(self, statement: ExplainStatement) -> ExplainStatement:
+        """分析EXPLAIN语句"""
+        # 检查要解释的语句的类型是否支持
+        if not isinstance(statement.statement, (SelectStatement, InsertStatement, UpdateStatement, DeleteStatement)):
+            raise SemanticError("EXPLAIN命令只支持SELECT、INSERT、UPDATE、DELETE等语句")
+
+        # 执行进一步的分析
+        self.analyze(statement.statement)
+        return statement
+
+    def analyze_lock(self, statement: LockStatement) -> LockStatement:
+        """分析LOCK语句"""
+        # 检查表是否存在
+        for table_name in statement.table_names:
+            if table_name not in self.tables:
+                raise SemanticError(f"表 '{table_name}' 不存在")
+
+        # 检查锁模式
+        if statement.mode not in LockMode:
+            raise SemanticError(f"无效的锁模式: {statement.mode}")
+
+        return statement
+
+    def analyze_create_role(self, statement: CreateRoleStatement) -> CreateRoleStatement:
+        role_name = statement.role_name
+        # 检查角色是否已存在
+        if role_name in self.roles:
+            raise SemanticError(f"角色 '{role_name}' 已存在")
+
+        # 添加角色
+        self.roles[role_name] = []
+
+        return statement
     def _check_column_expression(self, expr: Expression, table_name: str, table_columns: List[ColumnDefinition]):
         """检查选择列表达式是否正确"""
         if isinstance(expr, Column):

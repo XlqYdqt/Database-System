@@ -188,12 +188,58 @@ def test_error_cases():
             print(f"   预期错误: {e}")
 
 
+def test_sql_expansions():
+    """测试扩展的SQL语句"""
+    print("\n" + "=" * 50)
+    print("测试扩展的SQL语句")
+    print("=" * 50)
+
+    sql_statements = [
+        "BEGIN;",
+        "INSERT INTO users (id, name, age) VALUES (2, 'Bob', 30);",
+        "COMMIT;",
+        "BEGIN; UPDATE users SET age = 31 WHERE name = 'Bob'; ROLLBACK;",
+        "CREATE INDEX idx_users_name_age ON users(name, age);",
+        "SELECT name, age FROM users WHERE age > 20 AND name LIKE 'A%' ORDER BY age DESC, name ASC;",
+        "EXPLAIN SELECT name FROM users WHERE age > 25;",
+        "GRANT SELECT, UPDATE ON users TO bob;",
+        "REVOKE UPDATE ON users FROM bob;",
+        "CREATE ROLE data_analyst;",
+        "GRANT SELECT ON users TO data_analyst;",
+        "GRANT data_analyst TO alice;",
+    ]
+
+    for i, sql in enumerate(sql_statements, 1):
+        print(f"\n{i}. SQL: {sql}")
+
+        lexer = Lexer(sql)
+        tokens = lexer.tokenize()
+
+        parser = Parser(tokens)
+        try:
+            statement = parser.parse()
+            print(f"   AST: {statement}")
+
+            # 进一步进行语义分析和计划生成为必要步骤
+            analyzer = SemanticAnalyzer()
+            analyzed_stmt = analyzer.analyze(statement)
+            print(f"   语义分析成功: {analyzed_stmt}")
+
+            planner = Planner()
+            plan = planner.plan(analyzed_stmt)
+            print(f"   逻辑计划: {plan}")
+
+        except Exception as e:
+            print(f"   错误: {e}")
+
+
 if __name__ == "__main__":
     test_lexer()
     test_parser()
     test_semantic()
     test_planner()
     test_error_cases()
+    test_sql_expansions()  # 新增的测试调用
 
     print("\n" + "=" * 50)
     print("所有测试完成")
