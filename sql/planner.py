@@ -3,7 +3,7 @@
 支持事务、索引、权限、EXPLAIN
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 from .ast import *
 
 
@@ -77,6 +77,23 @@ class CreateTable(LogicalPlan):
 
     def __repr__(self):
         return f"CreateTable(table={self.table_name}, columns={self.columns})"
+
+
+class CreateRole(LogicalPlan):
+    def __init__(self, role_name: str):
+        self.role_name = role_name
+
+    def __repr__(self):
+        return f"CreateRole(role={self.role_name})"
+
+
+class GrantRole(LogicalPlan):
+    def __init__(self, roles: List[str], grantees: List[str]):
+        self.roles = roles
+        self.grantees = grantees
+
+    def __repr__(self):
+        return f"GrantRole(roles={self.roles}, grantees={self.grantees})"
 
 
 # ===== 新增算子：事务、索引、权限、EXPLAIN =====
@@ -175,6 +192,10 @@ class Planner:
             return self.plan_revoke(statement)
         elif isinstance(statement, ExplainStatement):
             return self.plan_explain(statement)
+        elif isinstance(statement, CreateRoleStatement):
+            return self.plan_create_role(statement)
+        elif isinstance(statement, GrantRoleStatement):  # 新增分支
+            return self.plan_grant_role(statement)
         else:
             raise ValueError(f"不支持的语句类型: {type(statement).__name__}")
 
@@ -222,3 +243,8 @@ class Planner:
     def plan_explain(self, statement: ExplainStatement) -> Explain:
         return Explain(self.plan(statement.statement), options=statement.options)
 
+    def plan_create_role(self, statement: CreateRoleStatement) -> CreateRole:
+        return CreateRole(statement.role_name)
+
+    def plan_grant_role(self, statement: GrantRoleStatement) -> GrantRole:  # 新增方法
+        return GrantRole(statement.roles, statement.grantees)

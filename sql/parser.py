@@ -1,6 +1,7 @@
-from typing import List, Optional, Dict
+from typing import List, Dict
 from .lexer import Token, TokenType, Lexer
 from .ast import *
+
 
 class Parser:
     """SQL语法分析器"""
@@ -34,7 +35,7 @@ class Parser:
             elif self.current_token.value == 'DELETE':
                 return self.parse_delete()
             elif self.current_token.value == 'GRANT':
-                return self.parse_grant()
+                return self.parse_grant()  # 现在可能返回 GrantStatement 或 GrantRoleStatement
             elif self.current_token.value == 'REVOKE':
                 return self.parse_revoke()
             elif self.current_token.value == 'LOCK':
@@ -198,7 +199,7 @@ class Parser:
 
         while self.current_token and self.current_token.type != TokenType.KEYWORD and self.current_token.value != 'FROM':
             # 检查通配符 *
-            if self.current_token.type == TokenType.OPERATOR and self.current_token.value == '*':  # 此处区别点在 `TokenType.OPERATOR` 而不是 `TokenType.WILDCARD`
+            if self.current_token.type == TokenType.OPERATOR and self.current_token.value == '*':
                 columns.append(Column('*'))
                 self._advance()
             else:
@@ -351,7 +352,7 @@ class Parser:
 
         raise SyntaxError(f"期望字面量，但得到{self.current_token.type.value}")
 
-    # 新增的解析方法
+
 
     def parse_create_index(self) -> CreateIndexStatement:
         """解析CREATE INDEX语句"""
@@ -426,9 +427,108 @@ class Parser:
 
         return TransactionStatement(command, isolation_level=isolation_level, savepoint_name=savepoint_name)
 
-    def parse_grant(self) -> GrantStatement:
-        """解析GRANT权限授予语句"""
+    def parse_create_role(self) -> CreateRoleStatement:
+        self._expect(TokenType.KEYWORD, 'CREATE')
+        self._expect(TokenType.KEYWORD, 'ROLE')
+
+        role_name = self._expect(TokenType.IDENTIFIER).value
+
+        if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
+            self._advance()
+
+        return CreateRoleStatement(role_name)
+
+    def parse_grant(self) -> Union[GrantStatement, GrantRoleStatement]:
+        """解析GRANT语句（权限授予或角色授予）"""
         self._expect(TokenType.KEYWORD, 'GRANT')
+
+        # 查看下一个token是权限还是角色名
+        next_token = self.current_token
+        if next_token and next_token.type == TokenType.KEYWORD and next_token.value.upper() in [p.value for p in
+                                                                                                Privilege]:
+            # 权限授予
+            privileges = [Privilege(self._expect(TokenType.KEYWORD).value)]
+            while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
+                self._advance()
+                privileges.append(Privilege(self._expect(TokenType.KEYWORD).value))
+
+            self._expect(TokenType.KEYWORD, 'ON')
+
+            # 尝试解析 object_type，如果未显式提供，则默认为 TABLE
+            object_type = None
+            if self.current_token.type == TokenType.KEYWORD:
+                object_type_str = self._expect(TokenType.KEYWORD).value
+                try:
+                    object_type = ObjectType(object_type_str.upper())
+                except ValueError:
+                    raise SyntaxError(f"不支持的对象类型: {object_type_str}")
+            else:
+                object_type = ObjectType.TABLE  # 默认为 TABLE
+
+            # 解析对象名称
+            object_name = self._expect(TokenType.IDENTIFIER).value
+
+            self._expect(TokenType.KEYWORD, 'TO')
+
+            # 解析 grantees 列表
+            grantees = [self._expect(TokenType.IDENTIFIER).value]
+            while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
+                self._advance()
+                grantees.append(self._expect(TokenType.IDENTIFIER).value)
+
+            # 检查是否包含 WITH GRANT OPTION
+            with_grant_option = False
+            if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'WITH':
+                self._advance()
+                self._expect(TokenType.KEYWORD, 'GRANT')
+                self._expect(TokenType.KEYWORD, 'OPTION')
+                with_grant_option = True
+
+            # 解析结束符号
+            if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
+                self._advance()
+
+            return GrantStatement(
+                privileges=privileges,
+                object_type=object_type,
+                object_name=object_name,
+                grantees=grantees,
+                with_grant_option=with_grant_option
+            )
+        else:
+            # 角色授予
+            roles = [self._expect(TokenType.IDENTIFIER).value]
+            while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
+                self._advance()
+                roles.append(self._expect(TokenType.IDENTIFIER).value)
+
+            self._expect(TokenType.KEYWORD, 'TO')
+
+            grantees = [self._expect(TokenType.IDENTIFIER).value]
+            while self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
+                self._advance()
+                grantees.append(self._expect(TokenType.IDENTIFIER).value)
+
+            # 检查是否包含 WITH ADMIN OPTION
+            with_admin_option = False
+            if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'WITH':
+                self._advance()
+                self._expect(TokenType.KEYWORD, 'ADMIN')
+                self._expect(TokenType.KEYWORD, 'OPTION')
+                with_admin_option = True
+
+            # 解析结束符号
+            if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
+                self._advance()
+
+            return GrantRoleStatement(
+                roles=roles,
+                grantees=grantees,
+                with_admin_option=with_admin_option
+            )
+    def parse_revoke(self) -> RevokeStatement:
+        """解析REVOKE权限撤销语句"""
+        self._expect(TokenType.KEYWORD, 'REVOKE')
 
         # 解析权限列表
         privileges = [Privilege(self._expect(TokenType.KEYWORD).value)]
@@ -452,7 +552,7 @@ class Parser:
         # 解析对象名称
         object_name = self._expect(TokenType.IDENTIFIER).value
 
-        self._expect(TokenType.KEYWORD, 'TO')
+        self._expect(TokenType.KEYWORD, 'FROM')
 
         # 解析 grantees 列表
         grantees = [self._expect(TokenType.IDENTIFIER).value]
@@ -460,21 +560,16 @@ class Parser:
             self._advance()
             grantees.append(self._expect(TokenType.IDENTIFIER).value)
 
-        # 检查是否包含 WITH GRANT OPTION
-        with_grant_option = False
-        if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'WITH':
-            self._advance()
-            self._expect(TokenType.KEYWORD, 'GRANT')
-            self._expect(TokenType.KEYWORD, 'OPTION')
-            with_grant_option = True
-
-        # 解析结束符号
         if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
             self._advance()
 
-        # 传递所有参数创建 GrantStatement
-        return GrantStatement(privileges=privileges, object_type=object_type, object_name=object_name,
-                              grantees=grantees, with_grant_option=with_grant_option)
+        # 添加 object_type 参数
+        return RevokeStatement(
+            privileges=privileges,
+            object_type=object_type,
+            object_name=object_name,
+            grantees=grantees
+        )
 
     def parse_lock(self) -> LockStatement:
         """解析LOCK语句"""
@@ -533,3 +628,15 @@ class Parser:
             self._advance()
 
         return ExplainStatement(statement, options=options, format=format)
+
+
+def is_privilege_keyword(self) -> bool:
+    """检查当前token是否是权限关键字"""
+    if not self.current_token or self.current_token.type != TokenType.KEYWORD:
+        return False
+
+    try:
+        Privilege(self.current_token.value.upper())
+        return True
+    except ValueError:
+        return False
