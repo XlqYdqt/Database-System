@@ -4,6 +4,7 @@
 from typing import List, Dict, Optional, Any
 from storage.buffer_pool_manager import Page
 from storage.buffer_pool_manager import BufferPoolManager
+from storage.lru_replacer import LRUReplacer
 from storage.disk_manager import DiskManager
 from engine.Catelog.catelog import Catalog # Import Catalog
 from engine.b_plus_tree import BPlusTree # Import BPlusTree
@@ -13,8 +14,11 @@ from engine.table_heap_page import TableHeapPage # Import TableHeapPage
 class StorageEngine:
     """存储引擎，负责行数据和页面之间的映射"""
     def __init__(self, catalog: Catalog, buffer_pool_size: int = 1024):
-        self.buffer_pool = BufferPoolManager(buffer_pool_size)
+
         self.file_manager = DiskManager("data")
+        self.lru_replacer = LRUReplacer(buffer_pool_size)
+        self.buffer_pool = BufferPoolManager(buffer_pool_size, self.file_manager, self.lru_replacer)
+
         self.catalog = catalog # Store the catalog instance
         self.indexes: Dict[str, BPlusTree] = {} # Change to BPlusTree
 
@@ -37,7 +41,7 @@ class StorageEngine:
         """将 CatalogPage 刷新到磁盘"""
         catalog_page_raw = self.buffer_pool.fetch_page(0)
         if catalog_page_raw:
-            catalog_page_raw.flush_page(self.catalog_page.serialize(), 0)
+            self.buffer_pool.flush_page(catalog_page_raw.page_id)
             self.buffer_pool.unpin_page(0, True)
         else:
             raise RuntimeError("CatalogPage not found in buffer pool for flushing")
