@@ -124,19 +124,19 @@ class Executor:
             right_value = expr.right
             
             # 比较操作
-            if expr.operator == '=':
+            if expr.op == '=':
                 return left_value == right_value
-            elif expr.operator == '>':
+            elif expr.op == '>':
                 return left_value > right_value
-            elif expr.operator == '<':
+            elif expr.op == '<':
                 return left_value < right_value
-            elif expr.operator == '>=':
+            elif expr.op == '>=':
                 return left_value >= right_value
-            elif expr.operator == '<=':
+            elif expr.op == '<=':
                 return left_value <= right_value
-            elif expr.operator == '!=':
+            elif expr.op == '!=':
                 return left_value != right_value
             else:
-                raise ValueError(f"Unsupported comparison operator: {expr.operator}")
+                raise ValueError(f"Unsupported comparison operator: {expr.op}")
             
         return False
