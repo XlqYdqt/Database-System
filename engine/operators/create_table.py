@@ -21,4 +21,9 @@ class CreateTableOperator:
         success = self.storage_engine.create_table(self.table_name)
         if not success:
             raise RuntimeError(f"Failed to create table '{self.table_name}'")
+        
+        # # 将 schema 注册到 Catalog
+        # # Convert ColumnDefinition objects to (name, type) tuples for the catalog
+        # schema_tuples = [(col.name, col.col_type) for col in self.columns]
+        # self.catalog.create_table(self.table_name, schema_tuples)
         return []

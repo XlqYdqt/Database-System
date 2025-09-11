@@ -3,8 +3,9 @@
 
 from typing import List, Optional, Any
 from sql.ast import *
-from sql.planner import Operator
+from sql.planner import *
 from .operators import *
+from .operators.insert import InsertOperator
 from .Catelog.catelog import Catalog
 from .storage_engine import StorageEngine
 
@@ -23,9 +24,9 @@ class Executor:
     
     def execute(self, plan: Operator) -> List[Any]:
         """执行查询计划，返回结果集"""
-        if isinstance(plan, CreateTableOperator):
+        if isinstance(plan, CreateTable):
             return self._execute_create_table(plan)
-        elif isinstance(plan, InsertOperator):
+        elif isinstance(plan, Insert):
             return self._execute_insert(plan)
         elif isinstance(plan, ProjectOperator):
             return self._execute_project(plan)
@@ -36,25 +37,17 @@ class Executor:
         else:
             raise ValueError(f"Unsupported operator type: {type(plan)}")
     
-    def _execute_create_table(self, op: CreateTableOperator) -> List[Any]:
+    def _execute_create_table(self, op: CreateTable) -> List[Any]:
         """执行CREATE TABLE操作"""
         # CreateTableOperator now handles the storage_engine.create_table call
         create_table_op = CreateTableOperator(op.table_name, op.columns, self.catalog, self.storage_engine)
         create_table_op.execute()
         return []
     
-    def _execute_insert(self, op: InsertOperator) -> List[Any]:
+    def _execute_insert(self, op: Insert) -> List[Any]:
         """执行INSERT操作"""
-        schema = self.catalog.get_schema(op.table_name)
-        # 确保插入的值与 schema 匹配
-        if len(op.values) != len(schema):
-            raise ValueError("Number of values does not match schema")
-        
-        # 将值序列化为字节
-        row_data = self.encode_tuple(op.values, schema)
-        # 调用存储引擎插入，存储引擎现在负责更新索引
-        self.storage_engine.insert_row(op.table_name, row_data)
-
+        insert_op = InsertOperator(op.table_name, op.values, self.catalog, self.storage_engine)
+        insert_op.execute()
         return []
     
     def _execute_project(self, op: ProjectOperator) -> List[Any]:

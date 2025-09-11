@@ -27,7 +27,7 @@ class DataType(Enum):
     UUID = 'UUID'
 
 
-class Operator(Enum):
+class Operator:
     """支持的运算符"""
     EQ = '='  # 等于
     NEQ = '!='  # 不等于

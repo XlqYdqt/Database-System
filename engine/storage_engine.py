@@ -6,16 +6,18 @@ from storage.buffer_pool_manager import Page
 from storage.buffer_pool_manager import BufferPoolManager
 from storage.lru_replacer import LRUReplacer
 from storage.disk_manager import DiskManager
+from engine.constants import PAGE_SIZE
 from engine.Catelog.catelog import Catalog # Import Catalog
 from engine.b_plus_tree import BPlusTree # Import BPlusTree
 from engine.catalog_page import CatalogPage # Import CatalogPage
 from engine.table_heap_page import TableHeapPage # Import TableHeapPage
+from engine.exceptions import TableAlreadyExistsError
 
 class StorageEngine:
     """存储引擎，负责行数据和页面之间的映射"""
     def __init__(self, catalog: Catalog, buffer_pool_size: int = 1024):
 
-        self.file_manager = DiskManager("data")
+        self.file_manager = DiskManager("data", PAGE_SIZE)
         self.lru_replacer = LRUReplacer(buffer_pool_size)
         self.buffer_pool = BufferPoolManager(buffer_pool_size, self.file_manager, self.lru_replacer)
 
@@ -30,17 +32,20 @@ class StorageEngine:
         else:
             self.catalog_page = CatalogPage()
             # Pin the new catalog page and mark it dirty
-            new_page = self.buffer_pool.new_page()
-            if new_page:
-                new_page.data = bytearray(self.catalog_page.serialize())
-                self.buffer_pool.unpin_page(0, True)
+            new_page_for_catalog = self.buffer_pool.new_page()
+            if new_page_for_catalog and new_page_for_catalog.page_id == 0:
+                self.catalog_page = CatalogPage()
+                new_page_for_catalog.data = bytearray(self.catalog_page.serialize())
+                self.buffer_pool.flush_page(new_page_for_catalog.page_id)
+                self.buffer_pool.unpin_page(new_page_for_catalog.page_id, True)
             else:
-                raise RuntimeError("Failed to create initial CatalogPage")
+                raise RuntimeError("Failed to create initial CatalogPage at page ID 0. new_page() did not return page 0 or failed.")
 
     def _flush_catalog_page(self):
         """将 CatalogPage 刷新到磁盘"""
         catalog_page_raw = self.buffer_pool.fetch_page(0)
         if catalog_page_raw:
+            catalog_page_raw.data = bytearray(self.catalog_page.serialize())
             self.buffer_pool.flush_page(catalog_page_raw.page_id)
             self.buffer_pool.unpin_page(0, True)
         else:
@@ -53,8 +58,13 @@ class StorageEngine:
     # ------------------------
     def create_table(self, table_name: str) -> bool:
         """为新表分配首页并初始化索引和元数据"""
+        catalog_page_raw = self.buffer_pool.fetch_page(0)
+        if not catalog_page_raw:
+            raise RuntimeError("CatalogPage (page 0) not found in buffer pool.")
+        # No need to deserialize catalog_page here, it's already loaded in __init__
+        print(self.catalog_page.list_tables())
         if table_name in self.catalog_page.list_tables():
-            return False # Table already exists
+            raise TableAlreadyExistsError(table_name)
 
         # 为新表分配一个 TableHeapPage 来管理数据页
         table_heap_page_raw = self.buffer_pool.new_page()
@@ -92,11 +102,17 @@ class StorageEngine:
 
         # 将表的元数据添加到 CatalogPage，现在存储 table_heap_page_id
         self.catalog_page.add_table(table_name, table_heap_page_id, index_root_page_id)
-        self._flush_catalog_page()
+        catalog_page_raw.data = self.catalog_page.serialize()
+        self.buffer_pool.flush_page(catalog_page_raw.page_id)
+        self.buffer_pool.unpin_page(0, True)
         return True
 
     def insert_row(self, table_name: str, row_data: bytes) -> bool:
         """插入一行数据"""
+        catalog_page_raw = self.buffer_pool.fetch_page(0)
+        if not catalog_page_raw:
+            raise RuntimeError("CatalogPage (page 0) not found in buffer pool.")
+        # No need to deserialize catalog_page here, it's already loaded in __init__
         # 1. 获取表的元数据
         table_metadata = self.catalog_page.get_table_metadata(table_name)
         table_heap_page_id = table_metadata['heap_root_page_id'] # 实际上是 table_heap_page_id

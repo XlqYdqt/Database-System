@@ -1,6 +1,6 @@
 from collections import deque
-from disk_manager import DiskManager
-from lru_replacer import LRUReplacer
+from .disk_manager import DiskManager
+from .lru_replacer import LRUReplacer
 
 # 导入 threading 模块，为并发环境下的锁机制提供支持
 import threading

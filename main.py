@@ -36,17 +36,13 @@ def main():
             semantic_analyzer = SemanticAnalyzer()
             # Pass the current catalog's tables and indexes to the semantic analyzer
             semantic_analyzer.tables = catalog.tables
-            semantic_analyzer.indexes = catalog.indexes
-            semantic_analyzer.roles = catalog.roles
             analyzed_ast = semantic_analyzer.analyze(ast)
             # Update the catalog with any changes from semantic analysis (e.g., new tables/indexes)
             catalog.tables = semantic_analyzer.tables
-            catalog.indexes = semantic_analyzer.indexes
-            catalog.roles = semantic_analyzer.roles
 
             # 4. 逻辑计划生成
-            planner = Planner(catalog)
-            logical_plan = planner.build_plan(analyzed_ast)
+            planner = Planner()
+            logical_plan = planner.plan(analyzed_ast)
 
             # 5. 执行计划
             result = executor.execute(logical_plan)

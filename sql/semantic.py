@@ -54,9 +54,9 @@ class SemanticAnalyzer:
         """分析CREATE TABLE语句"""
         table_name = statement.table_name
 
-        # 检查表是否已存在
-        if table_name in self.tables:
-            raise SemanticError(f"表 '{table_name}' 已存在")
+        # # 检查表是否已存在
+        # if table_name in self.tables:
+        #     raise SemanticError(f"表 '{table_name}' 已存在")
 
         # 检查列定义
         column_names = set()
@@ -85,34 +85,34 @@ class SemanticAnalyzer:
     def analyze_insert(self, statement: InsertStatement) -> InsertStatement:
         """分析INSERT语句"""
         table_name = statement.table_name
-
-        # 检查目标表是否存在
-        if table_name not in self.tables:
-            raise SemanticError(f"表 '{table_name}' 不存在")
-
-        table_columns = self.tables[table_name]
-
-        # 检查列名是否存在
-        if statement.columns:
-            for column_name in statement.columns:
-                if not any(col.name == column_name for col in table_columns):
-                    raise SemanticError(f"列 '{column_name}' 在表 '{table_name}' 中不存在")
-        else:
-            # 没有指定列名时，默认使用所有列
-            statement.columns = [col.name for col in table_columns]
-
-        # 检查插入值数量是否与列数量一致
-        if len(statement.values) != len(statement.columns):
-            raise SemanticError(f"值数量({len(statement.values)})与列数量({len(statement.columns)})不匹配")
-
-        # 检查值类型是否匹配列类型
-        for value, column_name in zip(statement.values, statement.columns):
-            column_def = next((col for col in table_columns if col.name == column_name), None)
-            if not column_def:
-                raise SemanticError(f"列 '{column_name}' 不存在")
-
-            if not self._check_type_compatibility(value, column_def.data_type):
-                raise SemanticError(f"值 '{value}' 的类型与列 '{column_name}' 的类型不匹配")
+        #
+        # # 检查目标表是否存在
+        # if table_name not in self.tables:
+        #     raise SemanticError(f"表 '{table_name}' 不存在")
+        #
+        # table_columns = self.tables[table_name]
+        #
+        # # 检查列名是否存在
+        # if statement.columns:
+        #     for column_name in statement.columns:
+        #         if not any(col.name == column_name for col in table_columns):
+        #             raise SemanticError(f"列 '{column_name}' 在表 '{table_name}' 中不存在")
+        # else:
+        #     # 没有指定列名时，默认使用所有列
+        #     statement.columns = [col.name for col in table_columns]
+        #
+        # # 检查插入值数量是否与列数量一致
+        # if len(statement.values) != len(statement.columns):
+        #     raise SemanticError(f"值数量({len(statement.values)})与列数量({len(statement.columns)})不匹配")
+        #
+        # # 检查值类型是否匹配列类型
+        # for value, column_name in zip(statement.values, statement.columns):
+        #     column_def = next((col for col in table_columns if col.name == column_name), None)
+        #     if not column_def:
+        #         raise SemanticError(f"列 '{column_name}' 不存在")
+        #
+        #     if not self._check_type_compatibility(value, column_def.data_type):
+        #         raise SemanticError(f"值 '{value}' 的类型与列 '{column_name}' 的类型不匹配")
 
         return statement
 
