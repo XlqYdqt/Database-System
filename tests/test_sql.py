@@ -207,7 +207,30 @@ def test_sql_expansions():
         "CREATE ROLE data_analyst;",
         "GRANT SELECT ON users TO data_analyst;",
         "GRANT data_analyst TO alice;",
+        # 添加子查询测试用例
+        "SELECT * FROM users WHERE age > (SELECT AVG(age) FROM users);",
+        "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > 100);",
+        "UPDATE users SET age = age + 1 WHERE id IN (SELECT user_id FROM orders WHERE status = 'completed');",
+        "DELETE FROM users WHERE id NOT IN (SELECT user_id FROM orders);",
+        "SELECT u.name, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS order_count FROM users u;"
     ]
+
+    # 创建分析器和计划器实例
+    analyzer = SemanticAnalyzer()
+    planner = Planner()
+
+    # 先创建必要的表结构
+    setup_sqls = [
+        "CREATE TABLE users (id INT PRIMARY KEY, name STRING, age INT);",
+        "CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, amount FLOAT, status STRING);"
+    ]
+
+    for sql in setup_sqls:
+        lexer = Lexer(sql)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens)
+        statement = parser.parse()
+        analyzer.analyze(statement)
 
     for i, sql in enumerate(sql_statements, 1):
         print(f"\n{i}. SQL: {sql}")
@@ -220,12 +243,11 @@ def test_sql_expansions():
             statement = parser.parse()
             print(f"   AST: {statement}")
 
-            # 进一步进行语义分析和计划生成为必要步骤
-            analyzer = SemanticAnalyzer()
+            # 进行语义分析
             analyzed_stmt = analyzer.analyze(statement)
             print(f"   语义分析成功: {analyzed_stmt}")
 
-            planner = Planner()
+            # 生成逻辑计划
             plan = planner.plan(analyzed_stmt)
             print(f"   逻辑计划: {plan}")
 
