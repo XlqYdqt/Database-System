@@ -3,7 +3,7 @@
 
 from typing import List, Dict, Optional, Any, Tuple
 
-from sql.ast import ColumnDefinition, DataType
+from sql.ast import ColumnDefinition, DataType, ColumnConstraint
 from storage.buffer_pool_manager import Page
 from storage.buffer_pool_manager import BufferPoolManager
 from storage.lru_replacer import LRUReplacer
@@ -13,6 +13,7 @@ from engine.constants import PAGE_SIZE
 from engine.b_plus_tree import BPlusTree # Import BPlusTree
 from engine.catalog_page import CatalogPage # Import CatalogPage
 from engine.table_heap_page import TableHeapPage # Import TableHeapPage
+from engine.data_page import DataPage # Import DataPage
 from engine.exceptions import TableAlreadyExistsError
 
 class StorageEngine:
@@ -60,7 +61,7 @@ class StorageEngine:
     # ------------------------
     # 表管理
     # ------------------------
-    def create_table(self, table_name: str, schema: List[Tuple[str, str]]) -> bool:
+    def create_table(self, table_name: str, columns: List[ColumnDefinition]) -> bool:
         """为新表分配首页并初始化索引和元数据"""
         print(self.catalog_page.list_tables())
         catalog_page_raw = self.buffer_pool.fetch_page(0)
@@ -92,7 +93,11 @@ class StorageEngine:
 
         # 将第一个数据页的 ID 添加到 TableHeapPage 中
         table_heap_page.add_page_id(first_data_page_id)
+        print(table_heap_page.get_page_ids())
+
         table_heap_page_raw.data = bytearray(table_heap_page.serialize())
+        print(table_heap_page_raw.data)
+        self.buffer_pool.flush_page(table_heap_page_raw.page_id)
         self.buffer_pool.unpin_page(table_heap_page_id, True)
 
         # 为索引分配根页面 (index root page)
@@ -111,8 +116,8 @@ class StorageEngine:
         # 将表的元数据添加到 CatalogPage，现在存储 table_heap_page_id
         # Convert schema list of tuples to dictionary for CatalogPage
         # schema_dict = {col_name: col_type for col_name, col_type in schema}
-        # Convert schema list of tuples to dictionary of ColumnDefinition objects for CatalogPage
-        schema_dict = {col_name: ColumnDefinition(col_name, col_type, []) for col_name, col_type in schema}
+        # Convert schema list of ColumnDefinition objects to a dictionary for CatalogPage
+        schema_dict = {col.name: col for col in columns}
         self.catalog_page.add_table(table_name, table_heap_page_id, index_root_page_id, schema_dict)
         catalog_page_raw.data = bytearray(self.catalog_page.serialize())
         self.buffer_pool.flush_page(catalog_page_raw.page_id)
@@ -120,6 +125,7 @@ class StorageEngine:
         return True
 
     def insert_row(self, table_name: str, row_data: bytes) -> bool:
+        print("1")
         """插入一行数据"""
         catalog_page_raw = self.buffer_pool.fetch_page(0)
         if not catalog_page_raw:
@@ -138,50 +144,119 @@ class StorageEngine:
         # 找到最后一个数据页
         data_page_ids = table_heap_page.get_page_ids()
         last_data_page_id = data_page_ids[-1] if data_page_ids else None
-        last_page = None
+        
+        current_data_page_raw: Optional[Page] = None
+        current_data_page: Optional[DataPage] = None
 
         if last_data_page_id is not None:
-            last_page = self.buffer_pool.fetch_page(last_data_page_id)
-            if not last_page:
+            current_data_page_raw = self.buffer_pool.fetch_page(last_data_page_id)
+            if not current_data_page_raw:
+                self.buffer_pool.unpin_page(table_heap_page_id, False)
+                return False
+            current_data_page = DataPage(current_data_page_raw.page_id, current_data_page_raw.data)
+
+
+
+
+        # 如果没有数据页，或者最后一个数据页已满（或不足以容纳新行），则分配新页
+        # 否则，将使用现有的未满数据页
+        if  self._page_is_full(current_data_page, len(row_data)):
+            if current_data_page_raw:
+                # If the existing page was full, unpin it and mark dirty
+                self.buffer_pool.unpin_page(current_data_page_raw.page_id, True)
+
+            new_page_raw = self.buffer_pool.new_page()
+            if not new_page_raw:
                 self.buffer_pool.unpin_page(table_heap_page_id, False)
                 return False
 
-        # 如果没有数据页或者最后一个数据页已满，则分配新页
-        if not last_page or self._page_is_full(last_page, len(row_data)):
-            if last_page:
-                self.buffer_pool.unpin_page(last_data_page_id, False)
+            current_data_page = DataPage(new_page_raw.page_id, new_page_raw.data)
+            current_data_page_raw = new_page_raw # Update the raw page reference
 
-            new_data_page = self.buffer_pool.new_page()
-            if not new_data_page:
-                self.buffer_pool.unpin_page(table_heap_page_id, False)
-                return False
-
-            last_page = new_data_page
-            table_heap_page.add_page_id(new_data_page.page_id)
+            table_heap_page.add_page_id(current_data_page.get_page_id())
             table_heap_page_raw.data = bytearray(table_heap_page.serialize())
             self.buffer_pool.unpin_page(table_heap_page_id, True) # Mark table_heap_page as dirty
-
-        # 确保在使用完数据页后 unpin
-        page = last_page # Use the found or newly created page
+        
+        # if not current_data_page or not current_data_page_raw:
+        #     # This should not happen if logic is correct, but for safety
+        #     self.buffer_pool.unpin_page(table_heap_page_id, False)
+        #     return False
 
         # 2. 插入数据
-        row_id = self._page_insert_row(page, row_data)
+        row_id = self._page_insert_row(current_data_page, row_data)
         if row_id is None:
+            # If insertion failed, unpin the page and return False
+            self.buffer_pool.unpin_page(current_data_page_raw.page_id, False) # Unpin the raw page
+            self.buffer_pool.unpin_page(table_heap_page_id, False)
             return False
+
+        # Mark the data page as dirty and unpin it after insertion
+        current_data_page_raw.data = bytearray(current_data_page.get_data())
+
 
         # 3. 更新索引
         schema = self.catalog_page.get_table_metadata(table_name)['schema']
-        # 假设第一个字段是主键
-        pk_col_name, pk_col_type = schema[0]
+
+        pk_col_name = None
+        pk_col_type = None
+        pk_col_index = -1
+
+        for i, (col_name, col_def) in enumerate(schema.items()):
+            # constraints 存在于 ColumnDefinition.constraints
+            if (ColumnConstraint.PRIMARY_KEY, None) in col_def.constraints:
+                pk_col_name = col_name
+                pk_col_type = col_def.data_type  # 注意这里是枚举 DataType
+                pk_col_index = i
+                break
+
+        if pk_col_name is None:
+            print(f"Error: No primary key defined for table {table_name}")
+            return False
 
         # 解码主键值
-        pk_value, _ = self._decode_value(row_data, 0, pk_col_type)
+        pk_value, _ = self._decode_value(row_data, pk_col_index, pk_col_type)
 
         # 存储主键到 (page_id, row_id) 的映射到B+树
         if table_name not in self.indexes:
             # This should ideally not happen if create_table is called first
             index_root_page_id = table_metadata['index_root_page_id']
             self.indexes[table_name] = BPlusTree(self.buffer_pool, index_root_page_id)
+            # Serialize RID (page_id, row_id) to bytes
+
+            rid_bytes = current_data_page_raw.page_id.to_bytes(4, 'little') + row_id.to_bytes(4, 'little')
+
+            # Convert pk_value to bytes for B+ tree key
+            # This is a simplified conversion, actual implementation might need more robust serialization
+            if pk_col_type.name == "INT":
+                pk_bytes = pk_value.to_bytes(4, 'little', signed=True)
+            elif pk_col_type.name == "TEXT":
+                pk_bytes = pk_value.encode('utf-8')
+            else:
+                raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type.name}")
+
+            self.indexes[table_name].insert(pk_bytes, tuple(rid_bytes))
+
+            self.buffer_pool.flush_page(current_data_page_raw.page_id)
+            self.buffer_pool.unpin_page(current_data_page_raw.page_id, True)  # Mark as dirty and unpin
+
+            return True
+
+    @staticmethod
+    def _page_is_full(data_page: DataPage, data_size: int) -> bool:
+        """检查数据页是否已满"""
+        print("2")
+        print(data_size)
+        print(data_page.get_free_space())
+        return data_page.get_free_space() < data_size
+
+    def _page_insert_row(self, data_page: DataPage, row_data: bytes) -> Optional[int]:
+        """在数据页中插入一行数据"""
+        print("执行_page_insert_row")
+        try:
+            offset = data_page.insert_record(row_data)
+            return offset
+        except ValueError:
+            return None
 
         # Serialize RID (page_id, row_id) to bytes
         rid_bytes = page.page_id.to_bytes(4, 'little') + row_id.to_bytes(4, 'little')
@@ -319,18 +394,25 @@ class StorageEngine:
     #         pass
     #     return new_page
 
-    def _decode_value(self, row_data: bytes, offset: int, col_type: str) -> tuple[Any, int]:
-        """根据 schema 解码单个值"""
+    def _decode_value(self, row_data: bytes, offset: int, col_type) -> tuple[Any, int]:
+        # 兼容 DataType 枚举和 str
+        if isinstance(col_type, DataType):
+            col_type = col_type.value
+        value = None
         if col_type == "INT":
-            value = int.from_bytes(row_data[offset:offset + 4], "little", signed=True)
+            value = int.from_bytes(row_data[offset : offset + 4], "little", signed=True)
             offset += 4
-        elif col_type == "TEXT":
-            length = int.from_bytes(row_data[offset:offset + 2], "little")
+        elif col_type == "TEXT" or col_type == "STRING":
+            length = int.from_bytes(row_data[offset : offset + 2], "little")
             offset += 2
-            value = row_data[offset:offset + length].decode("utf-8")
+            value = row_data[offset : offset + length].decode("utf-8")
             offset += length
+        elif col_type == "FLOAT":
+            import struct
+            value = struct.unpack("<f", row_data[offset : offset + 4])[0]
+            offset += 4
         else:
-            raise NotImplementedError(f"Unsupported type: {col_type}")
+            raise NotImplementedError(f"Unsupported type for decoding: {col_type}")
         return value, offset
 
     def get_row_by_key(self, table_name: str, pk_value: Any) -> Optional[bytes]:
@@ -456,42 +538,17 @@ class StorageEngine:
     PAGE_HEADER_SIZE = 4  # Bytes for next_free_offset
     ROW_LENGTH_PREFIX_SIZE = 2  # Bytes for row length
 
-    def _page_is_full(self, page: Page, row_size: int) -> bool:
+    def _page_is_full(self, page: DataPage, row_size: int) -> bool:
         """检查页面是否有足够的空间容纳新行"""
-        # 如果 page.data 还没有初始化到足够大，或者小于头部大小，则认为它没有空间
-        if len(page.data) < self.PAGE_HEADER_SIZE:
-            return True
+        return page.is_full() or page.get_free_space() < row_size
 
-        # 从 page.data 中读取 next_free_offset
-        next_free_offset = int.from_bytes(page.data[0:self.PAGE_HEADER_SIZE], 'little')
-
-        # 计算新行所需的总空间 (行数据 + 长度前缀)
-        total_required_space = row_size + self.ROW_LENGTH_PREFIX_SIZE
-
-        # 检查是否有足够的空间
-        return (next_free_offset + total_required_space) > self.file_manager.page_size
-
-    def _page_insert_row(self, page: Page, row_data: bytes) -> Optional[int]:
+    def _page_insert_row(self, page: DataPage, row_data: bytes) -> Optional[int]:
         """在页面中插入一行数据，返回行ID（偏移量）"""
-        # 确保 page.data 至少有头部大小
-        if len(page.data) < self.PAGE_HEADER_SIZE:
-            # 初始化 page.data 为全零，大小为 page_size
-            page.data = bytearray(self.file_manager.page_size)
-            # 初始化 next_free_offset 为 HEADER_SIZE
-            next_free_offset = self.PAGE_HEADER_SIZE
-        else:
-            next_free_offset = int.from_bytes(page.data[0:self.PAGE_HEADER_SIZE], 'little')
-
-        # 检查是否有足够的空间
-        required_space = len(row_data) + self.ROW_LENGTH_PREFIX_SIZE
-        if (next_free_offset + required_space) > self.file_manager.page_size:
-            return None  # 空间不足
-
-        # 写入行长度
-        page.data[next_free_offset : next_free_offset + self.ROW_LENGTH_PREFIX_SIZE] = len(row_data).to_bytes(self.ROW_LENGTH_PREFIX_SIZE, 'little')
-        current_offset = next_free_offset + self.ROW_LENGTH_PREFIX_SIZE
-
-        # 写入行数据
+        try:
+            offset = page.insert_record(row_data)
+            return offset
+        except ValueError:
+            return None
         page.data[current_offset : current_offset + len(row_data)] = row_data
 
         # 更新 next_free_offset
@@ -522,35 +579,23 @@ class StorageEngine:
             return None  # 数据越界
 
     def _page_update_row_in_place(self, page: Page, row_offset: int, new_row_data: bytes) -> bool:
-        """在页面中原地更新一行数据，如果新数据大小超过旧数据，则返回 False"""
-        if row_offset < self.PAGE_HEADER_SIZE or row_offset >= len(page.data):
-            return False  # 偏移量无效或在头部区域
-
+        """更新页面中的一行数据"""
+        data_page = DataPage(page.page_id, page.data)
         try:
-            # 读取旧行长度
-            old_row_length = int.from_bytes(page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE], 'little')
-            old_data_start_offset = row_offset + self.ROW_LENGTH_PREFIX_SIZE
-
-            # 如果新数据比旧数据长，则无法原地更新
-            if len(new_row_data) > old_row_length:
-                return False
-
-            # 写入新行长度 (如果新旧长度不同，需要更新长度前缀)
-            # 即使新数据短，也写入新数据的实际长度，而不是旧数据的长度
-            page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE] = len(new_row_data).to_bytes(self.ROW_LENGTH_PREFIX_SIZE, 'little')
-
-            # 写入新行数据
-            page.data[old_data_start_offset : old_data_start_offset + len(new_row_data)] = new_row_data
-
-            # 如果新数据比旧数据短，将剩余空间填充为零，以避免脏数据
-            if len(new_row_data) < old_row_length:
-                padding_start = old_data_start_offset + len(new_row_data)
-                padding_end = old_data_start_offset + old_row_length
-                page.data[padding_start:padding_end] = b'\x00' * (old_row_length - len(new_row_data))
-
+            # For simplicity, assuming update does not change record size significantly
+            # In a real system, this would involve more complex free space management
+            # This method needs to be adjusted based on how DataPage handles updates.
+            # For now, we'll assume DataPage.update_record can handle the update given an offset.
+            # The current DataPage.update_record assumes the record size doesn't change.
+            # If the new_row_data length is different, this will be an issue.
+            # For now, let's assume the new_row_data is the same length as the old one for in-place update.
+            # This needs to be consistent with how records are stored and updated in DataPage.
+            data_page.update_record(row_offset, new_row_data)
+            page.data = bytearray(data_page.get_data()) # Update the raw page data
+            page.is_dirty = True
             return True
         except IndexError:
-            return False  # 数据越界
+            return False
 
     def _page_delete_row(self, page: Page, row_offset: int) -> bool:
         """从页面中删除指定偏移量的行数据"""
