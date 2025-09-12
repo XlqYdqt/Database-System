@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
+
+from sql.ast import ColumnDefinition, DataType
 from storage.buffer_pool_manager import Page
 from storage.buffer_pool_manager import BufferPoolManager
 from storage.lru_replacer import LRUReplacer
 from storage.disk_manager import DiskManager
 from engine.constants import PAGE_SIZE
-from engine.Catelog.catelog import Catalog # Import Catalog
+
 from engine.b_plus_tree import BPlusTree # Import BPlusTree
 from engine.catalog_page import CatalogPage # Import CatalogPage
 from engine.table_heap_page import TableHeapPage # Import TableHeapPage
@@ -15,26 +17,28 @@ from engine.exceptions import TableAlreadyExistsError
 
 class StorageEngine:
     """存储引擎，负责行数据和页面之间的映射"""
-    def __init__(self, catalog: Catalog, buffer_pool_size: int = 1024):
+    def __init__(self, buffer_pool_size: int = 1024):
 
         self.file_manager = DiskManager("data", PAGE_SIZE)
         self.lru_replacer = LRUReplacer(buffer_pool_size)
         self.buffer_pool = BufferPoolManager(buffer_pool_size, self.file_manager, self.lru_replacer)
 
-        self.catalog = catalog # Store the catalog instance
+
         self.indexes: Dict[str, BPlusTree] = {} # Change to BPlusTree
 
         # Load or create CatalogPage
         catalog_page_raw = self.buffer_pool.fetch_page(0)
-        if catalog_page_raw :
+        if catalog_page_raw:
+            print(f"Raw catalog page data: {catalog_page_raw.data}")
             self.catalog_page = CatalogPage.deserialize(catalog_page_raw.data)
+            print(f"Deserialized catalog page tables: {self.catalog_page.tables}")
+            print(self.catalog_page.list_tables())
             self.buffer_pool.unpin_page(0, False)
         else:
             self.catalog_page = CatalogPage()
             # Pin the new catalog page and mark it dirty
             new_page_for_catalog = self.buffer_pool.new_page()
             if new_page_for_catalog and new_page_for_catalog.page_id == 0:
-                self.catalog_page = CatalogPage()
                 new_page_for_catalog.data = bytearray(self.catalog_page.serialize())
                 self.buffer_pool.flush_page(new_page_for_catalog.page_id)
                 self.buffer_pool.unpin_page(new_page_for_catalog.page_id, True)
@@ -56,13 +60,17 @@ class StorageEngine:
     # ------------------------
     # 表管理
     # ------------------------
-    def create_table(self, table_name: str) -> bool:
+    def create_table(self, table_name: str, schema: List[Tuple[str, str]]) -> bool:
         """为新表分配首页并初始化索引和元数据"""
-        catalog_page_raw = self.buffer_pool.fetch_page(0)
-        if not catalog_page_raw:
-            raise RuntimeError("CatalogPage (page 0) not found in buffer pool.")
-        # No need to deserialize catalog_page here, it's already loaded in __init__
         print(self.catalog_page.list_tables())
+        catalog_page_raw = self.buffer_pool.fetch_page(0)
+        # No need to deserialize catalog_page here, it's already loaded in __init__
+        if not self.buffer_pool.fetch_page(0):
+            raise RuntimeError("CatalogPage (page 0) not found in buffer pool.")
+
+        print("Creating table '{}'".format(table_name))
+
+
         if table_name in self.catalog_page.list_tables():
             raise TableAlreadyExistsError(table_name)
 
@@ -101,8 +109,12 @@ class StorageEngine:
         # self.indexes[table_name] = b_plus_tree
 
         # 将表的元数据添加到 CatalogPage，现在存储 table_heap_page_id
-        self.catalog_page.add_table(table_name, table_heap_page_id, index_root_page_id)
-        catalog_page_raw.data = self.catalog_page.serialize()
+        # Convert schema list of tuples to dictionary for CatalogPage
+        # schema_dict = {col_name: col_type for col_name, col_type in schema}
+        # Convert schema list of tuples to dictionary of ColumnDefinition objects for CatalogPage
+        schema_dict = {col_name: ColumnDefinition(col_name, col_type, []) for col_name, col_type in schema}
+        self.catalog_page.add_table(table_name, table_heap_page_id, index_root_page_id, schema_dict)
+        catalog_page_raw.data = bytearray(self.catalog_page.serialize())
         self.buffer_pool.flush_page(catalog_page_raw.page_id)
         self.buffer_pool.unpin_page(0, True)
         return True
@@ -158,7 +170,7 @@ class StorageEngine:
             return False
 
         # 3. 更新索引
-        schema = self.catalog.get_schema(table_name)
+        schema = self.catalog_page.get_table_metadata(table_name)['schema']
         # 假设第一个字段是主键
         pk_col_name, pk_col_type = schema[0]
 
@@ -195,7 +207,7 @@ class StorageEngine:
             return False
 
         # Convert pk_value to bytes for B+ tree search
-        schema = self.catalog.get_schema(table_name)
+        schema = self.catalog_page.get_table_metadata(table_name)['schema']
         pk_col_name, pk_col_type = schema[0]
 
         if pk_col_type == "INT":
@@ -327,7 +339,7 @@ class StorageEngine:
             return None
 
         # Convert pk_value to bytes for B+ tree search
-        schema = self.catalog.get_schema(table_name)
+        schema = self.catalog_page.get_table_metadata(table_name)['schema']
         pk_col_name, pk_col_type = schema[0]
 
         if pk_col_type == "INT":
@@ -398,7 +410,7 @@ class StorageEngine:
             self.indexes[table_name] = BPlusTree(self.buffer_pool, index_root_page_id)
 
         # 2. 根据主键查找旧记录的 RID (page_id, row_id)
-        schema = self.catalog.get_schema(table_name)
+        schema = self.catalog_page.get_table_metadata(table_name)['schema']
         pk_col_name, pk_col_type = schema[0]
 
         if pk_col_type == "INT":

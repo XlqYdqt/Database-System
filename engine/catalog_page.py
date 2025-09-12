@@ -1,6 +1,9 @@
-from typing import Dict, Tuple
-from engine.constants import PAGE_SIZE
 import json
+from typing import Dict, Any, Tuple, Optional
+from sql.ast import DataType, ColumnConstraint, ColumnDefinition
+
+from engine.constants import PAGE_SIZE
+
 
 class CatalogPage:
     """
@@ -8,20 +11,39 @@ class CatalogPage:
     它负责管理表的堆根页面ID和索引根页面ID。
     """
     def __init__(self):
-        # {table_name: {'heap_root_page_id': int, 'index_root_page_id': int}}
-        self.tables: Dict[str, Dict[str, int]] = {}
-        self.next_available_byte: int = 0
+        # {table_name: {'heap_root_page_id': int, 'index_root_page_id': int, 'schema': Dict[str, str]}}
+        self.tables: Dict[str, Dict[str, Any]] = {}
+        self.next_available_byte = 0 # Initialize next_available_byte
 
-    def add_table(self, table_name: str, heap_root_page_id: int, index_root_page_id: int):
+    def _serialize_schema(self, schema: Dict[str, ColumnDefinition]) -> Dict[str, Any]:
+        serialized_schema = {}
+        for col_name, col_def_obj in schema.items():
+            serialized_col_def = {
+                'name': col_def_obj.name,
+                'data_type': col_def_obj.data_type.value if col_def_obj.data_type else None,
+                'constraints': [
+                    (c.value, val) if isinstance(c, ColumnConstraint) else (c, val)
+                    for c, val in col_def_obj.constraints
+                ],
+                'default_value': col_def_obj.default_value,
+                'length': col_def_obj.length,
+                'precision': col_def_obj.precision,
+                'scale': col_def_obj.scale
+            }
+            serialized_schema[col_name] = serialized_col_def
+        return serialized_schema
+
+    def add_table(self, table_name: str, heap_root_page_id: int, index_root_page_id: int, schema: Dict[str, ColumnDefinition]):
         """添加一个新表的元数据"""
         if table_name in self.tables:
             raise RuntimeError(f"Table '{table_name}' already exists in CatalogPage")
         self.tables[table_name] = {
             'heap_root_page_id': heap_root_page_id,
-            'index_root_page_id': index_root_page_id
+            'index_root_page_id': index_root_page_id,
+            'schema': schema
         }
 
-    def get_table_metadata(self, table_name: str) -> Dict[str, int]:
+    def get_table_metadata(self, table_name: str) -> Dict[str, Any]:
         """获取表的元数据"""
         if table_name not in self.tables:
             raise RuntimeError(f"Table '{table_name}' not found in CatalogPage")
@@ -41,7 +63,14 @@ class CatalogPage:
         """将 CatalogPage 序列化为字节，以便写入磁盘"""
         # Serialize tables and next_available_byte
         data_to_serialize = {
-            'tables': self.tables,
+            'tables': {
+                table_name: {
+                    'heap_root_page_id': data['heap_root_page_id'],
+                    'index_root_page_id': data['index_root_page_id'],
+                    'schema': self._serialize_schema(data['schema'])
+                }
+                for table_name, data in self.tables.items()
+            },
             'next_available_byte': self.next_available_byte
         }
         serialized_data = json.dumps(data_to_serialize).encode('utf-8')
@@ -66,14 +95,48 @@ class CatalogPage:
             if null_byte_index != -1:
                 json_data_bytes = data[:null_byte_index]
             else:
-                json_data_bytes = data # No padding found, assume full data is JSON
+                json_data_bytes = data  # No padding found, assume full data is JSON
 
             decoded_data = json_data_bytes.decode('utf-8')
             loaded_data = json.loads(decoded_data)
-            catalog_page.tables = loaded_data.get('tables', {})
+            
+            deserialized_tables = {}
+            for table_name, table_data in loaded_data.get('tables', {}).items():
+                deserialized_tables[table_name] = {
+                    'heap_root_page_id': table_data['heap_root_page_id'],
+                    'index_root_page_id': table_data['index_root_page_id'],
+                    'schema': CatalogPage._deserialize_schema(table_data.get('schema', {}))
+                }
+            catalog_page.tables = deserialized_tables
             catalog_page.next_available_byte = loaded_data.get('next_available_byte', 0)
         except json.JSONDecodeError:
             # If data is empty or invalid JSON, initialize with an empty catalog and 0 next_available_byte
             catalog_page.tables = {}
             catalog_page.next_available_byte = 0
         return catalog_page
+
+    @staticmethod
+    def _deserialize_schema(schema: Dict[str, Any]) -> Dict[str, ColumnDefinition]:
+        deserialized_schema = {}
+        for col_name, col_def_dict in schema.items():
+            data_type = None
+            if 'data_type' in col_def_dict:
+                if isinstance(col_def_dict['data_type'], str):
+                    data_type = DataType(col_def_dict['data_type'])
+                elif isinstance(col_def_dict['data_type'], DataType):
+                    data_type = col_def_dict['data_type']
+            constraints = [
+                (ColumnConstraint(c), val) if isinstance(c, str) else (c, val)
+                for c, val in col_def_dict.get('constraints', [])
+            ]
+            deserialized_col_def_obj = ColumnDefinition(
+                name=col_def_dict['name'],
+                data_type=data_type,
+                constraints=constraints,
+                default_value=col_def_dict.get('default_value'),
+                length=col_def_dict.get('length'),
+                precision=col_def_dict.get('precision'),
+                scale=col_def_dict.get('scale')
+            )
+            deserialized_schema[col_name] = deserialized_col_def_obj
+        return deserialized_schema

@@ -3,17 +3,14 @@
 
 from typing import List, Any
 from engine.storage_engine import StorageEngine
-from engine.Catelog.catelog import Catalog
 
-
-from engine.storage_engine import StorageEngine
 
 class SeqScanOperator:
     """全表扫描算子的具体实现"""
-    def __init__(self, table_name: str, storage_engine: StorageEngine, catalog: Catalog):
+    def __init__(self, table_name: str, storage_engine: StorageEngine):
         self.table_name = table_name
         self.storage_engine = storage_engine
-        self.catalog = catalog
+
 
     def execute(self) -> List[Any]:
         """执行顺序扫描操作"""
@@ -22,8 +19,8 @@ class SeqScanOperator:
         if not rows:
             return []
 
-        # 从 Catalog 获取 schema
-        schema = self.catalog.get_schema(self.table_name)
+        # 从 StorageEngine 获取 schema
+        schema = self.storage_engine.get_schema(self.table_name)
 
         # 逐行解码
         decoded_rows = []

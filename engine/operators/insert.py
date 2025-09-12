@@ -5,23 +5,23 @@ from typing import List, Any
 from sql.ast import *
 from engine.storage_engine import StorageEngine
 
-from engine.Catelog.catelog import Catalog
+
 
 
 
 class InsertOperator:
     """插入算子的具体实现"""
 
-    def __init__(self, table_name: str, values: List[object], catalog: Catalog, storage_engine: StorageEngine):
+    def __init__(self, table_name: str, values: List[object], storage_engine: StorageEngine):
         self.table_name = table_name
         self.values = values
-        self.catalog = catalog
+
         self.storage_engine = storage_engine
 
     def execute(self) -> List[Any]:
         """执行插入操作"""
         # 从 Catalog 获取 schema
-        schema = self.catalog.get_schema(self.table_name)
+        schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)['schema']
 
         # 将值序列化为字节
         row_data = self.encode_tuple(self.values, schema)

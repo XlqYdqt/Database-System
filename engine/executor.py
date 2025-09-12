@@ -6,7 +6,7 @@ from sql.ast import *
 from sql.planner import *
 from .operators import *
 from .operators.insert import InsertOperator
-from .Catelog.catelog import Catalog
+
 from .storage_engine import StorageEngine
 
 class ExecutionContext:
@@ -19,8 +19,8 @@ class Executor:
     """执行器，负责遍历和执行算子树"""
     def __init__(self):
         self.context = ExecutionContext()
-        self.catalog = Catalog()
-        self.storage_engine = StorageEngine(self.catalog)
+
+
     
     def execute(self, plan: Operator) -> List[Any]:
         """执行查询计划，返回结果集"""
@@ -40,13 +40,13 @@ class Executor:
     def _execute_create_table(self, op: CreateTable) -> List[Any]:
         """执行CREATE TABLE操作"""
         # CreateTableOperator now handles the storage_engine.create_table call
-        create_table_op = CreateTableOperator(op.table_name, op.columns, self.catalog, self.storage_engine)
+        create_table_op = CreateTableOperator(op.table_name, op.columns, self.storage_engine)
         create_table_op.execute()
         return []
     
     def _execute_insert(self, op: Insert) -> List[Any]:
         """执行INSERT操作"""
-        insert_op = InsertOperator(op.table_name, op.values, self.catalog, self.storage_engine)
+        insert_op = InsertOperator(op.table_name, op.values, self.storage_engine)
         insert_op.execute()
         return []
     
@@ -62,7 +62,7 @@ class Executor:
         # 否则只返回指定的列
         results = []
         table_name = self._get_base_table_name(op.child)
-        schema = self.catalog.get_schema(table_name)
+        schema = self.storage_engine.catalog_page.get_table_metadata(table_name)['schema']
         
         # 创建列名到索引的映射
         col_name_to_index = {col_name: i for i, (col_name, _) in enumerate(schema)}

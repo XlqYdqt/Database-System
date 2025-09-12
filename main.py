@@ -6,15 +6,14 @@ from sql.parser import Parser
 from sql.semantic import SemanticAnalyzer
 from sql.planner import Planner
 from engine.executor import Executor
-from engine.Catelog.catelog import Catalog
+
 from engine.storage_engine import StorageEngine
+import copy
 
 def main():
     """主程序入口，处理SQL输入并执行"""
-    catalog = Catalog()
-    storage_engine = StorageEngine(catalog)
+    storage_engine = StorageEngine()
     executor = Executor()
-    executor.catalog = catalog # Ensure executor uses the same catalog instance
     executor.storage_engine = storage_engine # Ensure executor uses the same storage engine instance
 
     while True:
@@ -35,10 +34,11 @@ def main():
             # 3. 语义分析
             semantic_analyzer = SemanticAnalyzer()
             # Pass the current catalog's tables and indexes to the semantic analyzer
-            semantic_analyzer.tables = catalog.tables
+            semantic_analyzer.tables = copy.deepcopy(storage_engine.catalog_page.list_tables())
+
+
             analyzed_ast = semantic_analyzer.analyze(ast)
             # Update the catalog with any changes from semantic analysis (e.g., new tables/indexes)
-            catalog.tables = semantic_analyzer.tables
 
             # 4. 逻辑计划生成
             planner = Planner()
