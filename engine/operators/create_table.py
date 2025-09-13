@@ -18,8 +18,7 @@ class CreateTableOperator:
     def execute(self) -> List[Any]:
         """执行创建表操作"""
         # 调用存储引擎创建表
-        schema_tuples = [(col.name, col.data_type) for col in self.columns]
-        success = self.storage_engine.create_table(self.table_name, schema_tuples)
+        success = self.storage_engine.create_table(self.table_name, self.columns)
         if not success:
             raise RuntimeError(f"Failed to create table '{self.table_name}'")
         

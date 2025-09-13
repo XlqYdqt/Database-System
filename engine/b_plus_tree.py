@@ -39,8 +39,7 @@ class InternalPage(BPlusTreePage):
     key是用来划分键值范围的标志
     """
     # 假设 key 和 page_id （指针）都是4字节整数
-    # todo 此处的key可以根据需要来修改 目前索引key的类型只有整数
-    KEY_FORMAT = '>i'
+    KEY_FORMAT = '4s'
     POINTER_FORMAT = '>i'
     KEY_SIZE = struct.calcsize(KEY_FORMAT)
     POINTER_SIZE = struct.calcsize(POINTER_FORMAT)
@@ -139,7 +138,7 @@ class LeafPage(BPlusTreePage):
     叶子节点页面的包装类。
     布局: [ HEADER | prev_pid | next_pid | key_1 | rid_1 | key_2 | rid_2 | ... ]
     """
-    KEY_FORMAT = 'i'
+    KEY_FORMAT = '4s'
     KEY_SIZE = struct.calcsize(KEY_FORMAT)
     # 假设 RID 是 (page_id, slot_num)，分别为4字节和2字节
     RID_FORMAT = 'ih'
@@ -546,6 +545,6 @@ class BPlusTree:
 
         parent_node.serialize()
         new_internal_node.serialize()
-        self.bpm.unpin_page(new_internal_page_obj.page.page_id, is_dirty=True)
+        self.bpm.unpin_page(new_internal_page_obj.page_id, is_dirty=True)
 
-        return self._insert_into_parent(key_to_push_up, new_internal_page_obj.page.page_id, context)
+        return self._insert_into_parent(key_to_push_up, new_internal_page_obj.page_id, context)

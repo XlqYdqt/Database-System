@@ -32,7 +32,7 @@ def main():
             ast = parser.parse()
 
             # 3. 语义分析
-            semantic_analyzer = SemanticAnalyzer()
+            semantic_analyzer = SemanticAnalyzer(storage_engine.catalog_page)
             # Pass the current catalog's tables and indexes to the semantic analyzer
             semantic_analyzer.tables = copy.deepcopy(storage_engine.catalog_page.list_tables())
 

@@ -10,10 +10,11 @@ class CatalogPage:
     CatalogPage 存储在 page_id=0，作为所有表的元数据目录。
     它负责管理表的堆根页面ID和索引根页面ID。
     """
+
     def __init__(self):
         # {table_name: {'heap_root_page_id': int, 'index_root_page_id': int, 'schema': Dict[str, str]}}
         self.tables: Dict[str, Dict[str, Any]] = {}
-        self.next_available_byte = 0 # Initialize next_available_byte
+        self.next_available_byte = 0  # Initialize next_available_byte
 
     def _serialize_schema(self, schema: Dict[str, ColumnDefinition]) -> Dict[str, Any]:
         serialized_schema = {}
@@ -33,7 +34,8 @@ class CatalogPage:
             serialized_schema[col_name] = serialized_col_def
         return serialized_schema
 
-    def add_table(self, table_name: str, heap_root_page_id: int, index_root_page_id: int, schema: Dict[str, ColumnDefinition]):
+    def add_table(self, table_name: str, heap_root_page_id: int, index_root_page_id: int,
+                  schema: Dict[str, ColumnDefinition]):
         """添加一个新表的元数据"""
         if table_name in self.tables:
             raise RuntimeError(f"Table '{table_name}' already exists in CatalogPage")
@@ -99,7 +101,7 @@ class CatalogPage:
 
             decoded_data = json_data_bytes.decode('utf-8')
             loaded_data = json.loads(decoded_data)
-            
+
             deserialized_tables = {}
             for table_name, table_data in loaded_data.get('tables', {}).items():
                 deserialized_tables[table_name] = {
