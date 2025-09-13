@@ -45,6 +45,7 @@ class UpdateOperator(Operator):
         else:
             # 回退到子算子扫描
             # 子算子返回的是 (rid, row_data_dict) 列表
+            print(self.child)
             scanned_rows = self.executor.execute(self.child)
             for rid, row_data_dict in scanned_rows:
                 rid_list.append((rid, row_data_dict))
