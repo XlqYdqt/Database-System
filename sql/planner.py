@@ -222,10 +222,28 @@ class Planner:
         return plan
 
     def plan_update(self, statement: UpdateStatement) -> Update:
-        return Update(statement.table_name, statement.assignments, statement.where)
+        """生成更新的逻辑计划"""
+        # 生成顺序扫描算子作为子操作符
+        child = SeqScan(statement.table_name)
+
+        # 如果有WHERE条件，加入过滤算子
+        if statement.where:
+            child = Filter(statement.where, child)
+
+        # 生成 Update 操作符，传递 child 操作符
+        return Update(statement.table_name, statement.assignments, statement.where, child)
 
     def plan_delete(self, statement: DeleteStatement) -> Delete:
-        return Delete(statement.table_name, statement.where)
+        """生成删除的逻辑计划"""
+        # 生成顺序扫描算子作为子操作符
+        child = SeqScan(statement.table_name)
+
+        # 如果有WHERE条件，加入过滤算子
+        if statement.where:
+            child = Filter(statement.where, child)
+
+        # 生成 Delete 操作符，传递 child 操作符
+        return Delete(statement.table_name, statement.where, child)
 
     def plan_transaction(self, statement: TransactionStatement) -> LogicalPlan:
         if statement.command == TransactionCommand.BEGIN:
