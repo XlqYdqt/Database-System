@@ -1,7 +1,8 @@
 # data_page.py
 from typing import List, Tuple
 
-from engine.constants import PAGE_SIZE
+from engine.constants import PAGE_SIZE, ROW_LENGTH_PREFIX_SIZE
+
 
 class DataPage:
     def __init__(self, page_id: int, data: bytes = b''):
@@ -41,13 +42,67 @@ class DataPage:
         self.free_space_pointer += total_size
         return offset
 
-    def update_record(self, offset: int, record_data: bytes):
-        record_size = len(record_data)
-        # For simplicity, assuming update does not change record size significantly
-        # In a real system, this would involve more complex free space management
-        if offset + record_size > self.free_space_pointer:
-            raise IndexError("Record update out of bounds")
-        self.data[offset:offset + record_size] = record_data
+    def update_record(self, offset: int, new_row_bytes: bytes) -> Tuple[int, bool]:
+        """
+        更新一条记录。
+
+        :param offset: 记录起始偏移（指向长度前缀的起始位置）
+        :param new_row_bytes: 不含长度前缀的记录内容 bytes
+        :return: (new_offset, moved)
+                 new_offset: 记录最终所在位置（如果未移动则等于 offset）
+                 moved: 如果为 True 表示记录被移到了页尾（offset 无效，需要上层更新 RID/index）
+        可能抛出 IndexError/ValueError（越界或空间不足）
+        """
+        # 边界检查：必须能读取旧的长度前缀
+        if offset < 0 or offset + ROW_LENGTH_PREFIX_SIZE > len(self.data):
+            raise IndexError("Invalid record offset")
+
+        # 读取旧记录长度（行级，不含前缀）
+        existing_length = int.from_bytes(
+            self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE], "little"
+        )
+        existing_total = ROW_LENGTH_PREFIX_SIZE + existing_length
+
+        new_length = len(new_row_bytes)
+        new_total = ROW_LENGTH_PREFIX_SIZE + new_length
+
+        # 情形 A：新长度小于等于旧长度 -> 原地写入（覆盖），并将多余字节清0
+        if new_length <= existing_length:
+            # 写长度前缀
+            self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE] = new_length.to_bytes(
+                ROW_LENGTH_PREFIX_SIZE, "little"
+            )
+            # 写数据
+            start = offset + ROW_LENGTH_PREFIX_SIZE
+            self.data[start: start + new_length] = new_row_bytes
+            # 将旧记录剩余的字节置0（避免残留内容被误读）
+            for i in range(start + new_length, offset + existing_total):
+                self.data[i] = 0
+            # free_space_pointer 不变
+            return offset, False
+
+        # 情形 B：新长度大于旧长度 -> 尝试在页尾追加（并将原记录逻辑删除）
+        extra_needed = new_total - existing_total
+        if self.get_free_space() < new_total:
+            # 尝试判断：如果释放掉旧记录空间（将其标记为 deleted）是否足够 —— 这里我们选择不回收旧空间立即复用，
+            # 因为回收需要移动后续记录或维护空闲链表，比较复杂。直接失败或让上层决定页分裂。
+            raise ValueError("Not enough free space on page for in-place expansion; need page split or compaction")
+
+        # 标记原记录为删除（长度置 0）
+        self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(ROW_LENGTH_PREFIX_SIZE, "little")
+
+        # 在页尾写入新的记录（带长度前缀）
+        new_offset = self.free_space_pointer
+        self.data[new_offset: new_offset + ROW_LENGTH_PREFIX_SIZE] = new_length.to_bytes(
+            ROW_LENGTH_PREFIX_SIZE, "little"
+        )
+        start = new_offset + ROW_LENGTH_PREFIX_SIZE
+        self.data[start: start + new_length] = new_row_bytes
+
+        # 更新 free_space_pointer
+        self.free_space_pointer += new_total
+
+        return new_offset, True
 
     def get_data(self) -> bytes:
         return bytes(self.data)

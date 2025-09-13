@@ -11,23 +11,19 @@ class SeqScanOperator:
         self.table_name = table_name
         self.storage_engine = storage_engine
 
-
     def execute(self) -> List[Any]:
-        """执行顺序扫描操作"""
-        # 调用存储引擎扫描表
+        """执行顺序扫描操作，返回 (rid, row_dict)"""
         rows = self.storage_engine.scan_table(self.table_name)
         if not rows:
             return []
 
-        # 从 StorageEngine 获取 schema
         schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)['schema']
 
-        # 逐行解码
         decoded_rows = []
-        for raw in rows:
+        for rid, raw in rows:
             values = self.decode_tuple(raw, schema)
             row_dict = {col_name: val for col_name, val in zip(schema.keys(), values)}
-            decoded_rows.append(row_dict)
+            decoded_rows.append((rid, row_dict))  # ✅ 保留 rid
         return decoded_rows
 
     def decode_tuple(self, raw: bytes, schema: dict):

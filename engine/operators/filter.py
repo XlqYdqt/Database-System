@@ -12,18 +12,16 @@ class FilterOperator(Operator):
         self.condition = condition  # WHERE条件
         self.child = child         # 子算子
         self.executor = executor
-    
+
     def execute(self) -> List[Any]:
-        """执行过滤操作"""
+        """执行过滤操作，输入输出都是 (rid, row_dict)"""
         # 先执行子算子获取数据
-        rows = self.executor.execute(self.child)
-        print(self.condition)
-        
-        # 应用过滤条件
+        rows = self.executor.execute(self.child)  # [(rid, row_dict), ...]
+
         results = []
-        for row in rows:
-            if self._evaluate_condition(row):
-                results.append(row)
+        for rid, row in rows:
+            if self._evaluate_condition(row):  # ✅ 只把 row_dict 传给条件判断
+                results.append((rid, row))  # ✅ 保留 rid
         return results
 
     def _evaluate_condition(self, row: Any) -> bool:

@@ -65,7 +65,8 @@ class UpdateOperator(Operator):
             schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)['schema']
             new_row_data_bytes = self._serialize_row_data(new_row_data, schema)
 
-            self.storage_engine.update_row(self.table_name, pk_value, new_row_data_bytes)
+            # self.storage_engine.update_row(self.table_name, pk_value, new_row_data_bytes)
+            self.storage_engine.update_row_by_rid(self.table_name, rid, new_row_data_bytes)
             updated_count += 1
 
         return [updated_count]
@@ -152,12 +153,15 @@ class UpdateOperator(Operator):
 
             if col_def.data_type == DataType.INT:
                 serialized_data += value.to_bytes(4, 'little', signed=True)
-            elif col_def.data_type == DataType.TEXT:
+
+            elif col_def.data_type in (DataType.TEXT, DataType.STRING):  # ✅ 支持 STRING
                 encoded_value = value.encode('utf-8')
                 serialized_data += len(encoded_value).to_bytes(4, 'little') + encoded_value
+
             elif col_def.data_type == DataType.FLOAT:
                 import struct
                 serialized_data += struct.pack("<f", value)
+
             else:
                 raise NotImplementedError(f"Unsupported data type for serialization: {col_def.data_type}")
         return serialized_data
@@ -167,8 +171,13 @@ class UpdateOperator(Operator):
         deserialized_data = {}
         offset = 0
         for col_name, col_def in schema.items():
-            value, new_offset = self.storage_engine._decode_value(row_data_bytes, offset, col_def.data_type)
+            # ✅ STRING 也走 decode
+            if col_def.data_type in (DataType.TEXT, DataType.STRING):
+                value, new_offset = self.storage_engine._decode_value(row_data_bytes, offset, "TEXT")
+            else:
+                value, new_offset = self.storage_engine._decode_value(row_data_bytes, offset, col_def.data_type)
             deserialized_data[col_name] = value
             offset = new_offset
         return deserialized_data
+
 

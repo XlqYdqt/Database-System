@@ -24,7 +24,7 @@ class ProjectOperator:
 
         # 如果是 SELECT *，直接返回所有列
         if '*' in column_names:
-            return rows
+            return [row_dict for _, row_dict in rows]  # ✅ 去掉 rid
         # 否则只返回指定的列
         results = []
         # 获取子操作符的表名
@@ -34,15 +34,16 @@ class ProjectOperator:
         # 创建列名到索引的映射
         col_name_to_index = {col_name: i for i, (col_name, _) in enumerate(schema.items())}
 
-        for row in rows:
+        for rid, row_dict in rows:  # 解包成 rid 和 row_dict
             projected_row = []
             for col in self.columns:
                 col_name = col.name if isinstance(col, Column) else col  # 统一成字符串
                 if col_name in col_name_to_index:
-                    projected_row.append(row[col_name])  # row 是 dict，用字符串取值
+                    projected_row.append(row_dict[col_name])  # ✅ 从 dict 取值
                 else:
                     raise ValueError(f"Column '{col_name}' not found in table '{table_name}'")
             results.append(projected_row)
+
         return results
 
     def _get_base_table_name(self, op) -> str:
