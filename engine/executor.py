@@ -28,11 +28,11 @@ class Executor:
             return self._execute_create_table(plan)
         elif isinstance(plan, Insert):
             return self._execute_insert(plan)
-        elif isinstance(plan, ProjectOperator):
+        elif isinstance(plan, Project):
             return self._execute_project(plan)
-        elif isinstance(plan, FilterOperator):
+        elif isinstance(plan, Filter):
             return self._execute_filter(plan)
-        elif isinstance(plan, SeqScanOperator):
+        elif isinstance(plan, SeqScan):
             return self._execute_seq_scan(plan)
         else:
             raise ValueError(f"Unsupported operator type: {type(plan)}")
@@ -50,7 +50,7 @@ class Executor:
         insert_op.execute()
         return []
     
-    def _execute_project(self, op: ProjectOperator) -> List[Any]:
+    def _execute_project(self, op: Project) -> List[Any]:
         """执行投影操作"""
         # 先执行子算子
         child_results = self.execute(op.child)
@@ -78,7 +78,7 @@ class Executor:
             results.append(projected_row)
         return results
     
-    def _execute_filter(self, op: FilterOperator) -> List[Any]:
+    def _execute_filter(self, op: Filter) -> List[Any]:
         """执行过滤操作"""
         # 先执行子算子
         child_results = self.execute(op.child)
@@ -91,7 +91,7 @@ class Executor:
                 results.append(row)
         return results
     
-    def _execute_seq_scan(self, op: SeqScanOperator) -> List[Any]:
+    def _execute_seq_scan(self, op: SeqScan) -> List[Any]:
         """执行顺序扫描操作"""
         return op.execute()
 
