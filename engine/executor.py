@@ -17,8 +17,9 @@ class ExecutionContext:
 
 class Executor:
     """执行器，负责遍历和执行算子树"""
-    def __init__(self):
+    def __init__(self, storage_engine: StorageEngine):
         self.context = ExecutionContext()
+        self.storage_engine = storage_engine
 
 
     
@@ -52,84 +53,15 @@ class Executor:
     
     def _execute_project(self, op: Project) -> List[Any]:
         """执行投影操作"""
-        # 先执行子算子
-        child_results = self.execute(op.child)
-        
-        # 如果是 SELECT *，直接返回所有列
-        if '*' in op.columns:
-            return child_results
-        
-        # 否则只返回指定的列
-        results = []
-        table_name = self._get_base_table_name(op.child)
-        schema = self.storage_engine.catalog_page.get_table_metadata(table_name)['schema']
-        
-        # 创建列名到索引的映射
-        col_name_to_index = {col_name: i for i, (col_name, _) in enumerate(schema)}
-        
-        for row in child_results:
-            projected_row = []
-            for col_name in op.columns:
-                if col_name in col_name_to_index:
-                    projected_row.append(row[col_name])
-                else:
-                    # 处理列不存在的情况，可以抛出错误或返回 None
-                    raise ValueError(f"Column '{col_name}' not found in table '{table_name}'")
-            results.append(projected_row)
-        return results
+        project_op = ProjectOperator(op.columns, op.child, self.storage_engine, self)
+        return project_op.execute()
     
     def _execute_filter(self, op: Filter) -> List[Any]:
         """执行过滤操作"""
-        # 先执行子算子
-        child_results = self.execute(op.child)
-        
-        # 应用过滤条件
-        results = []
-        for row in child_results:
-            self.context.current_row = row
-            if self._evaluate_expression(op.condition):
-                results.append(row)
-        return results
+        filter_op = FilterOperator(op.condition, op.child)
+        return filter_op.execute()
     
     def _execute_seq_scan(self, op: SeqScan) -> List[Any]:
         """执行顺序扫描操作"""
-        return op.execute()
-
-    def _get_base_table_name(self, op: Operator) -> str:
-        """Recursively finds the base table name from the operator tree."""
-        if isinstance(op, SeqScanOperator):
-            return op.table_name
-        elif hasattr(op, 'child') and op.child is not None:
-            return self._get_base_table_name(op.child)
-        else:
-            raise ValueError(f"Could not determine base table name from operator type: {type(op)}")
-    
-    def _evaluate_expression(self, expr: Expression) -> bool:
-        """评估WHERE表达式"""
-        if isinstance(expr, BinaryExpression):
-            # 获取当前行中的列值
-            if isinstance(expr.left, ColumnDefinition):
-                col_name = expr.left.name
-            else:
-                col_name = expr.left
-            left_value = self.context.current_row[col_name]
-
-            right_value = expr.right
-            
-            # 比较操作
-            if expr.op == '=':
-                return left_value == right_value
-            elif expr.op == '>':
-                return left_value > right_value
-            elif expr.op == '<':
-                return left_value < right_value
-            elif expr.op == '>=':
-                return left_value >= right_value
-            elif expr.op == '<=':
-                return left_value <= right_value
-            elif expr.op == '!=':
-                return left_value != right_value
-            else:
-                raise ValueError(f"Unsupported comparison operator: {expr.op}")
-            
-        return False
+        seq_scan_op = SeqScanOperator(op.table_name, self.storage_engine)
+        return seq_scan_op.execute()

@@ -13,8 +13,8 @@ import copy
 def main():
     """主程序入口，处理SQL输入并执行"""
     storage_engine = StorageEngine()
-    executor = Executor()
-    executor.storage_engine = storage_engine # Ensure executor uses the same storage engine instance
+    executor = Executor(storage_engine)
+    # executor.storage_engine = storage_engine # Ensure executor uses the same storage engine instance
 
     while True:
         try:

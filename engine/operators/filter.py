@@ -33,6 +33,15 @@ class FilterOperator(Operator):
             # 比较操作
             if self.condition.operator == '=':
                 return left_value == right_value
-            # TODO: 支持其他比较操作符
+            elif self.condition.operator == '>':
+                return left_value > right_value
+            elif self.condition.operator == '<':
+                return left_value < right_value
+            elif self.condition.operator == '>=':
+                return left_value >= right_value
+            elif self.condition.operator == '<=':
+                return left_value <= right_value
+            elif self.condition.operator == '!=':
+                return left_value != right_value
             
         return False

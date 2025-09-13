@@ -20,7 +20,7 @@ class SeqScanOperator:
             return []
 
         # 从 StorageEngine 获取 schema
-        schema = self.storage_engine.get_schema(self.table_name)
+        schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)['schema']
 
         # 逐行解码
         decoded_rows = []
@@ -30,18 +30,24 @@ class SeqScanOperator:
             decoded_rows.append(row_dict)
         return decoded_rows
 
-    def decode_tuple(self, raw: bytes, schema: list):
+    def decode_tuple(self, raw: bytes, schema: dict):
         values, offset = [], 0
-        for _, col_type in schema:
+        for col_def in schema.values():
+            col_type = col_def.data_type.name
             if col_type == "INT":
                 val = int.from_bytes(raw[offset:offset + 4], "little", signed=True)
                 offset += 4
                 values.append(val)
-            elif col_type == "TEXT":
+            elif col_type == "TEXT" or col_type == "STRING":
                 length = int.from_bytes(raw[offset:offset + 2], "little")
                 offset += 2
                 val = raw[offset:offset + length].decode("utf-8")
                 offset += length
+                values.append(val)
+            elif col_type == "FLOAT":
+                import struct
+                val = struct.unpack("<f", raw[offset:offset + 4])[0]
+                offset += 4
                 values.append(val)
             else:
                 raise NotImplementedError(f"Unsupported type: {col_type}")
