@@ -479,7 +479,58 @@ class StorageEngine:
     #
     #     # Delete from B+ tree index
     #     return self.indexes[table_name].delete(pk_bytes)
+    def delete_row_by_rid(self, table_name: str, rid: tuple) -> bool:
+        """
+        根据 RID 删除一行数据（逻辑删除：将长度前缀置为 0）。
+        :param table_name: 表名
+        :param rid: (page_id, offset)
+        :return: True 如果删除成功，False 如果失败
+        """
+        page_id, offset = rid
 
+        # 取出对应页
+        page = self.buffer_pool.fetch_page(page_id)
+        if not page:
+            return False
+
+        data_page = DataPage(page.page_id, page.data)
+
+        try:
+            # 安全检查：至少能读出一个长度前缀
+            if offset + ROW_LENGTH_PREFIX_SIZE > len(data_page.data):
+                self.buffer_pool.unpin_page(page_id, False)
+                return False
+
+            # 读原始记录长度
+            row_length = int.from_bytes(
+                data_page.data[offset: offset + ROW_LENGTH_PREFIX_SIZE], "little"
+            )
+            if row_length == 0:
+                # 已经是逻辑删除
+                self.buffer_pool.unpin_page(page_id, False)
+                return False
+
+            # 写入 0 作为删除标记
+            data_page.data[offset: offset + ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(
+                ROW_LENGTH_PREFIX_SIZE, "little"
+            )
+
+            # 可选：也把数据区清零，避免残留数据
+            start = offset + ROW_LENGTH_PREFIX_SIZE
+            for i in range(start, start + row_length):
+                if i < len(data_page.data):
+                    data_page.data[i] = 0
+
+            # 写回页
+            page.data = bytearray(data_page.get_data())
+            self.buffer_pool.flush_page(page_id)
+            self.buffer_pool.unpin_page(page_id, True)  # 标记为脏页
+            return True
+
+        except Exception as e:
+            print(f"Delete row failed at rid {rid}: {e}")
+            self.buffer_pool.unpin_page(page_id, False)
+            return False
     # def update_row(self, table_name: str, pk_value: Any, new_row_data: bytes) -> bool:
     #     """更新一行数据"""
     #     # 1. 获取表的元数据和索引

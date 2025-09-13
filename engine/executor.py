@@ -84,15 +84,9 @@ class Executor:
 
     def _execute_delete(self, op: Delete) -> List[Any]:
         """执行DELETE操作"""
-        # 根据是否有条件选择子操作符
-        if op.condition:
-            # 如果有条件，则子操作符是FilterOperator
-            child_op = FilterOperator(op.condition, SeqScanOperator(op.table_name, self.storage_engine), self)
-        else:
-            # 如果没有条件，则子操作符是SeqScanOperator
-            child_op = SeqScanOperator(op.table_name, self.storage_engine)
+
 
         # 获取B+树索引
         bplus_tree = self.storage_engine.get_bplus_tree(op.table_name)
-        delete_op = DeleteOperator(op.table_name, child_op, self.storage_engine, self, bplus_tree)
+        delete_op = DeleteOperator(op.table_name, op.child, self.storage_engine, self, bplus_tree)
         return delete_op.execute()
