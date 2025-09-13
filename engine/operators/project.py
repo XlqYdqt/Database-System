@@ -19,11 +19,12 @@ class ProjectOperator:
         """执行投影操作"""
         # 先执行子算子获取数据
         rows = self.executor.execute(self.child)
-        
+        # 先把 Column 对象转换成字符串列名
+        column_names = [col.name if isinstance(col, Column) else col for col in self.columns]
+
         # 如果是 SELECT *，直接返回所有列
-        if '*' in self.columns:
+        if '*' in column_names:
             return rows
-        
         # 否则只返回指定的列
         results = []
         # 获取子操作符的表名
