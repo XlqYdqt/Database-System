@@ -6,6 +6,8 @@ from sql.ast import *
 from sql.planner import *
 from .operators import *
 from .operators.insert import InsertOperator
+from .operators.update import UpdateOperator
+from .operators.delete import DeleteOperator
 
 from .storage_engine import StorageEngine
 
@@ -35,6 +37,10 @@ class Executor:
             return self._execute_filter(plan)
         elif isinstance(plan, SeqScan):
             return self._execute_seq_scan(plan)
+        elif isinstance(plan, Update):
+            return self._execute_update(plan)
+        elif isinstance(plan, Delete):
+            return self._execute_delete(plan)
         else:
             raise ValueError(f"Unsupported operator type: {type(plan)}")
     
@@ -65,3 +71,28 @@ class Executor:
         """执行顺序扫描操作"""
         seq_scan_op = SeqScanOperator(op.table_name, self.storage_engine)
         return seq_scan_op.execute()
+
+    def _execute_update(self, op: Update) -> List[Any]:
+        """执行UPDATE操作"""
+        # assignments 是 dict，转成 [(col, expr), ...]
+        updates = list(op.assignments.items())
+
+        # 获取B+树索引
+        bplus_tree = self.storage_engine.get_bplus_tree(op.table_name)
+        update_op = UpdateOperator(op.table_name, op.child, updates, self.storage_engine, self, bplus_tree)
+        return update_op.execute()
+
+    def _execute_delete(self, op: Delete) -> List[Any]:
+        """执行DELETE操作"""
+        # 根据是否有条件选择子操作符
+        if op.condition:
+            # 如果有条件，则子操作符是FilterOperator
+            child_op = FilterOperator(op.condition, SeqScanOperator(op.table_name, self.storage_engine), self)
+        else:
+            # 如果没有条件，则子操作符是SeqScanOperator
+            child_op = SeqScanOperator(op.table_name, self.storage_engine)
+
+        # 获取B+树索引
+        bplus_tree = self.storage_engine.get_bplus_tree(op.table_name)
+        delete_op = DeleteOperator(op.table_name, child_op, self.storage_engine, self, bplus_tree)
+        return delete_op.execute()

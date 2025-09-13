@@ -53,6 +53,7 @@ class Insert(LogicalPlan):
 
 class Update(LogicalPlan):
     def __init__(self, table_name: str, assignments: Dict[str, Expression], filter_condition: Expression = None):
+
         self.table_name = table_name
         self.assignments = assignments
         self.filter_condition = filter_condition

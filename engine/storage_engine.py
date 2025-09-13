@@ -56,6 +56,9 @@ class StorageEngine:
         else:
             raise RuntimeError("CatalogPage not found in buffer pool for flushing")
 
+    def get_bplus_tree(self, table_name: str) -> Optional[BPlusTree]:
+        """获取指定表的B+树索引"""
+        return self.indexes.get(table_name)
 
 
     # ------------------------
