@@ -546,6 +546,6 @@ class BPlusTree:
 
         parent_node.serialize()
         new_internal_node.serialize()
-        self.bpm.unpin_page(new_internal_page_obj.page.page_id, is_dirty=True)
+        self.bpm.unpin_page(new_internal_page_obj.page_id, is_dirty=True)
 
-        return self._insert_into_parent(key_to_push_up, new_internal_page_obj.page.page_id, context)
+        return self._insert_into_parent(key_to_push_up, new_internal_page_obj.page_id, context)
