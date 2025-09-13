@@ -52,23 +52,31 @@ class Insert(LogicalPlan):
 
 
 class Update(LogicalPlan):
-    def __init__(self, table_name: str, assignments: Dict[str, Expression], filter_condition: Expression = None):
-
+    def __init__(self, table_name: str, assignments: Dict[str, Expression], filter_condition: Expression = None, child: Optional[LogicalPlan] = None):
         self.table_name = table_name
         self.assignments = assignments
         self.filter_condition = filter_condition
+        self.child = child  # 新增 child 参数，用来传递子操作符
 
     def __repr__(self):
-        return f"Update(table={self.table_name}, assignments={self.assignments}, filter={self.filter_condition})"
+        if self.child:
+            return f"Update(table={self.table_name}, assignments={self.assignments}, filter={self.filter_condition}) -> {self.child}"
+        else:
+            return f"Update(table={self.table_name}, assignments={self.assignments}, filter={self.filter_condition})"
 
 
 class Delete(LogicalPlan):
-    def __init__(self, table_name: str, filter_condition: Expression = None):
+    def __init__(self, table_name: str, filter_condition: Expression = None, child: Optional[LogicalPlan] = None):
         self.table_name = table_name
         self.filter_condition = filter_condition
+        self.child = child  # 新增 child 参数，用来传递子操作符
 
     def __repr__(self):
-        return f"Delete(table={self.table_name}, filter={self.filter_condition})"
+        if self.child:
+            return f"Delete(table={self.table_name}, filter={self.filter_condition}) -> {self.child}"
+        else:
+            return f"Delete(table={self.table_name}, filter={self.filter_condition})"
+
 
 
 class CreateTable(LogicalPlan):
