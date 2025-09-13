@@ -59,6 +59,12 @@ class Operator:
     SHIFT_LEFT = '<<'
     SHIFT_RIGHT = '>>'
 
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return self.value
+
 
 class JoinType(Enum):
     """连接类型"""

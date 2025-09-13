@@ -283,7 +283,10 @@ class Parser:
         """解析逻辑表达式（AND/OR）"""
         left = self.parse_comparison_expression()
 
-        while self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value in ('AND', 'OR'):
+        while (self.current_token and
+               self.current_token.type == TokenType.KEYWORD and
+               self.current_token.value in ('AND', 'OR')):
+            # 创建 Operator 实例
             op = Operator(self.current_token.value)
             self._advance()
             right = self.parse_comparison_expression()
@@ -295,7 +298,11 @@ class Parser:
         """解析比较表达式"""
         left = self.parse_primary_expression()
 
-        if self.current_token and self.current_token.type == TokenType.OPERATOR and self.current_token.value in ('=', '!=', '<', '<=', '>', '>='):
+        if (self.current_token and
+                self.current_token.type == TokenType.OPERATOR and
+                self.current_token.value in ('=', '!=', '<', '<=', '>', '>=', 'LIKE', 'ILIKE', 'IN', 'IS', 'IS NOT',
+                                             'BETWEEN')):
+            # 创建 Operator 实例
             op = Operator(self.current_token.value)
             self._advance()
             right = self.parse_primary_expression()
