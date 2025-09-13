@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from typing import List, Any
+
+from engine.operators import SeqScanOperator
 from sql.ast import *
 from sql.planner import Operator
 
@@ -10,11 +12,13 @@ class ProjectOperator:
     def __init__(self, columns: List[str], child: Operator, storage_engine: Any, executor: Any):
         self.columns = columns  # 需要投影的列
         self.child = child     # 子算子
+        self.storage_engine = storage_engine
+        self.executor = executor
     
     def execute(self) -> List[Any]:
         """执行投影操作"""
         # 先执行子算子获取数据
-        rows = self.child.execute()
+        rows = self.executor.execute(self.child)
         
         # 如果是 SELECT *，直接返回所有列
         if '*' in self.columns:
@@ -31,23 +35,37 @@ class ProjectOperator:
 
         for row in rows:
             projected_row = []
-            for col_name in self.columns:
+            for col in self.columns:
+                col_name = col.name if isinstance(col, Column) else col  # 统一成字符串
                 if col_name in col_name_to_index:
-                    projected_row.append(row[col_name])
+                    projected_row.append(row[col_name])  # row 是 dict，用字符串取值
                 else:
-                    # 处理列不存在的情况，可以抛出错误或返回 None
                     raise ValueError(f"Column '{col_name}' not found in table '{table_name}'")
             results.append(projected_row)
         return results
 
-    def _get_base_table_name(self, op: Operator) -> str:
-        """Recursively finds the base table name from the operator tree."""
-        # 检查操作符是否是 SeqScanOperator 的实例
+    def _get_base_table_name(self, op) -> str:
+        """递归获取基表名，兼容 Operator 或 LogicalPlan"""
+        from engine.operators import SeqScanOperator
+
+        # 1. 如果是 SeqScanOperator，直接返回表名
         if isinstance(op, SeqScanOperator):
             return op.table_name
-        # 如果操作符有子操作符，则递归调用
-        elif hasattr(op, 'child') and op.child is not None:
+
+        # 2. 如果是 FilterOperator 或 ProjectOperator，尝试递归子算子
+        if hasattr(op, 'child') and op.child is not None:
             return self._get_base_table_name(op.child)
-        # 如果无法确定基表名，则抛出错误
-        else:
-            raise ValueError(f"Could not determine base table name from operator type: {type(op)}")
+
+        # 3. 如果是 LogicalPlan，尝试获取其 table_name 属性
+        if hasattr(op, 'table_name'):
+            return op.table_name
+
+        # 4. 如果还有 children 列表，也可以递归
+        if hasattr(op, 'children') and op.children:
+            for child in op.children:
+                try:
+                    return self._get_base_table_name(child)
+                except ValueError:
+                    continue
+
+        raise ValueError(f"Could not determine base table name from type {type(op)}")

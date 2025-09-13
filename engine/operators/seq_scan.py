@@ -26,7 +26,7 @@ class SeqScanOperator:
         decoded_rows = []
         for raw in rows:
             values = self.decode_tuple(raw, schema)
-            row_dict = {col_name: val for (col_name, _), val in zip(schema, values)}
+            row_dict = {col_name: val for col_name, val in zip(schema.keys(), values)}
             decoded_rows.append(row_dict)
         return decoded_rows
 
@@ -39,8 +39,8 @@ class SeqScanOperator:
                 offset += 4
                 values.append(val)
             elif col_type == "TEXT" or col_type == "STRING":
-                length = int.from_bytes(raw[offset:offset + 2], "little")
-                offset += 2
+                length = int.from_bytes(raw[offset:offset + 4], "little")
+                offset += 4
                 val = raw[offset:offset + length].decode("utf-8")
                 offset += length
                 values.append(val)

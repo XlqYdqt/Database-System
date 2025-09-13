@@ -58,7 +58,7 @@ class Executor:
     
     def _execute_filter(self, op: Filter) -> List[Any]:
         """执行过滤操作"""
-        filter_op = FilterOperator(op.condition, op.child)
+        filter_op = FilterOperator(op.condition, op.child, self)
         return filter_op.execute()
     
     def _execute_seq_scan(self, op: SeqScan) -> List[Any]:

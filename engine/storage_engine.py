@@ -8,7 +8,7 @@ from storage.buffer_pool_manager import Page
 from storage.buffer_pool_manager import BufferPoolManager
 from storage.lru_replacer import LRUReplacer
 from storage.disk_manager import DiskManager
-from engine.constants import PAGE_SIZE
+from engine.constants import PAGE_SIZE, ROW_LENGTH_PREFIX_SIZE
 
 from engine.b_plus_tree import BPlusTree # Import BPlusTree
 from engine.catalog_page import CatalogPage # Import CatalogPage
@@ -110,8 +110,8 @@ class StorageEngine:
         table_heap_page.add_page_id(index_root_page_id)
 
         # Initialize a B+ tree for the new table
-        # b_plus_tree = BPlusTree( self.buffer_pool,index_root_page_id)
-        # self.indexes[table_name] = b_plus_tree
+        b_plus_tree = BPlusTree(self.buffer_pool, index_root_page_id)
+        self.indexes[table_name] = b_plus_tree
 
         # 将表的元数据添加到 CatalogPage，现在存储 table_heap_page_id
         # Convert schema list of tuples to dictionary for CatalogPage
@@ -160,7 +160,7 @@ class StorageEngine:
 
         # 如果没有数据页，或者最后一个数据页已满（或不足以容纳新行），则分配新页
         # 否则，将使用现有的未满数据页
-        if  self._page_is_full(current_data_page, len(row_data)):
+        if current_data_page is None or self._page_is_full(current_data_page, len(row_data)):
             if current_data_page_raw:
                 # If the existing page was full, unpin it and mark dirty
                 self.buffer_pool.unpin_page(current_data_page_raw.page_id, True)
@@ -177,10 +177,10 @@ class StorageEngine:
             table_heap_page_raw.data = bytearray(table_heap_page.serialize())
             self.buffer_pool.unpin_page(table_heap_page_id, True) # Mark table_heap_page as dirty
         
-        # if not current_data_page or not current_data_page_raw:
-        #     # This should not happen if logic is correct, but for safety
-        #     self.buffer_pool.unpin_page(table_heap_page_id, False)
-        #     return False
+        if not current_data_page or not current_data_page_raw:
+            # This should not happen if logic is correct, but for safety
+            self.buffer_pool.unpin_page(table_heap_page_id, False)
+            return False
 
         # 2. 插入数据
         row_id = self._page_insert_row(current_data_page, row_data)
@@ -223,23 +223,23 @@ class StorageEngine:
             self.indexes[table_name] = BPlusTree(self.buffer_pool, index_root_page_id)
             # Serialize RID (page_id, row_id) to bytes
 
-            rid_bytes = current_data_page_raw.page_id.to_bytes(4, 'little') + row_id.to_bytes(4, 'little')
+        rid_bytes = current_data_page_raw.page_id.to_bytes(4, 'little') + row_id.to_bytes(4, 'little')
 
-            # Convert pk_value to bytes for B+ tree key
-            # This is a simplified conversion, actual implementation might need more robust serialization
-            if pk_col_type.name == "INT":
-                pk_bytes = pk_value.to_bytes(4, 'little', signed=True)
-            elif pk_col_type.name == "TEXT":
-                pk_bytes = pk_value.encode('utf-8')
-            else:
-                raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type.name}")
+        # Convert pk_value to bytes for B+ tree key
+        # This is a simplified conversion, actual implementation might need more robust serialization
+        if pk_col_type.name == "INT":
+            pk_bytes = pk_value.to_bytes(4, 'little', signed=True)
+        elif pk_col_type.name == "TEXT":
+            pk_bytes = pk_value.encode('utf-8')
+        else:
+            raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type.name}")
 
-            self.indexes[table_name].insert(pk_bytes, tuple(rid_bytes))
+        self.indexes[table_name].insert(pk_bytes, rid_bytes)
 
-            self.buffer_pool.flush_page(current_data_page_raw.page_id)
-            self.buffer_pool.unpin_page(current_data_page_raw.page_id, True)  # Mark as dirty and unpin
+        self.buffer_pool.flush_page(current_data_page_raw.page_id)
+        self.buffer_pool.unpin_page(current_data_page_raw.page_id, True)  # Mark as dirty and unpin
 
-            return True
+        return True
 
     @staticmethod
     def _page_is_full(data_page: DataPage, data_size: int) -> bool:
@@ -253,7 +253,13 @@ class StorageEngine:
         """在数据页中插入一行数据"""
         print("执行_page_insert_row")
         try:
-            offset = data_page.insert_record(row_data)
+            from engine.constants import ROW_LENGTH_PREFIX_SIZE
+
+            # 给每一行加上长度前缀
+            row_length = len(row_data)
+            record = row_length.to_bytes(ROW_LENGTH_PREFIX_SIZE, "little") + row_data
+
+            offset = data_page.insert_record(record)
             return offset
         except ValueError:
             return None
@@ -330,20 +336,18 @@ class StorageEngine:
         table_heap_page = TableHeapPage.deserialize(table_heap_page_raw.data)
         self.buffer_pool.unpin_page(table_heap_page_id, False)
 
-        # 遍历 TableHeapPage 中记录的所有数据页
+        # 遍历 TableHeapPage 中记录的所有数据页，排除 TableHeapPage 自身的 page_id
         for data_page_id in table_heap_page.get_page_ids():
+            if data_page_id == table_heap_page_id:
+                continue
             page = self.buffer_pool.fetch_page(data_page_id)
             if not page:
                 continue # Skip if page cannot be fetched
 
             # 从页中读取所有行
-            row_id = 0
-            while True:
-                row_data = self._page_get_row(page, row_id)
-                if not row_data:
-                    break
+            data_page = DataPage(page.page_id, page.data)
+            for offset, row_data in data_page.get_all_records():
                 results.append(row_data)
-                row_id += 1
 
             self.buffer_pool.unpin_page(data_page_id, False)
             # A proper implementation would involve a page directory or linked list of pages
@@ -403,8 +407,8 @@ class StorageEngine:
             value = int.from_bytes(row_data[offset : offset + 4], "little", signed=True)
             offset += 4
         elif col_type == "TEXT" or col_type == "STRING":
-            length = int.from_bytes(row_data[offset : offset + 2], "little")
-            offset += 2
+            length = int.from_bytes(row_data[offset : offset + 4], "little")
+            offset += 4
             value = row_data[offset : offset + length].decode("utf-8")
             offset += length
         elif col_type == "FLOAT":
@@ -560,13 +564,13 @@ class StorageEngine:
 
     def _page_get_row(self, page: Page, row_offset: int) -> Optional[bytes]:
         """从页面中获取指定偏移量的行数据"""
-        if row_offset < self.PAGE_HEADER_SIZE or row_offset >= len(page.data):
+        if row_offset < 0 or row_offset >= len(page.data):
             return None  # 偏移量无效或在头部区域
 
         try:
             # 读取行长度
-            row_length = int.from_bytes(page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE], 'little')
-            data_start_offset = row_offset + self.ROW_LENGTH_PREFIX_SIZE
+            row_length = int.from_bytes(page.data[row_offset : row_offset + ROW_LENGTH_PREFIX_SIZE], 'little')
+            data_start_offset = row_offset + ROW_LENGTH_PREFIX_SIZE
 
             # 如果 row_length 为 0，表示该行已被逻辑删除
             if row_length == 0:
@@ -602,15 +606,16 @@ class StorageEngine:
         # 简单的删除：将行数据标记为已删除（例如，将长度设为0）
         # 实际的删除会涉及空闲空间管理，例如使用位图或空闲链表。
         # 这里我们只是将该行的数据长度标记为0，表示逻辑删除。
-        if row_offset < self.PAGE_HEADER_SIZE or row_offset >= len(page.data):
+        if row_offset < 0 or row_offset >= len(page.data):
             return False  # 偏移量无效或在头部区域
 
         try:
+            from engine.constants import ROW_LENGTH_PREFIX_SIZE
             # 读取行长度
-            row_length = int.from_bytes(page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE], 'little')
+            row_length = int.from_bytes(page.data[row_offset : row_offset + ROW_LENGTH_PREFIX_SIZE], 'little')
 
             # 将长度标记为0，表示删除
-            page.data[row_offset : row_offset + self.ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(self.ROW_LENGTH_PREFIX_SIZE, 'little')
+            page.data[row_offset : row_offset + ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(ROW_LENGTH_PREFIX_SIZE, 'little')
             # 清空数据（可选，但有助于调试和避免数据泄露）
             # page.data[row_offset + self.ROW_LENGTH_PREFIX_SIZE : row_offset + self.ROW_LENGTH_PREFIX_SIZE + row_length] = bytearray(row_length)
             return True

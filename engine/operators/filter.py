@@ -3,18 +3,21 @@
 
 from typing import List, Any
 from sql.ast import *
-from sql.planner import Operator
+from sql.planner import Operator, LogicalPlan
+from typing import Any
 
 class FilterOperator(Operator):
     """过滤算子的具体实现"""
-    def __init__(self, condition: Expression, child: Operator):
+    def __init__(self, condition: Expression, child: LogicalPlan, executor: Any):
         self.condition = condition  # WHERE条件
         self.child = child         # 子算子
+        self.executor = executor
     
     def execute(self) -> List[Any]:
         """执行过滤操作"""
         # 先执行子算子获取数据
-        rows = self.child.execute()
+        rows = self.executor.execute(self.child)
+        print(self.condition)
         
         # 应用过滤条件
         results = []
@@ -22,26 +25,37 @@ class FilterOperator(Operator):
             if self._evaluate_condition(row):
                 results.append(row)
         return results
-    
+
     def _evaluate_condition(self, row: Any) -> bool:
-        """评估WHERE条件"""
         if isinstance(self.condition, BinaryExpression):
-            # 获取行中的列值
-            left_value = row[self.condition.left]
-            right_value = self.condition.right
-            
-            # 比较操作
-            if self.condition.operator == '=':
+            left_value = self._eval_expr(self.condition.left, row)
+            right_value = self._eval_expr(self.condition.right, row)
+
+            op = getattr(self.condition, "op", None) or getattr(self.condition, "operator", None)
+            print(op.value)
+            if op.value == '=':
                 return left_value == right_value
-            elif self.condition.operator == '>':
+            elif op.value == '>':
                 return left_value > right_value
-            elif self.condition.operator == '<':
+            elif op.value == '<':
                 return left_value < right_value
-            elif self.condition.operator == '>=':
+            elif op.value == '>=':
                 return left_value >= right_value
-            elif self.condition.operator == '<=':
+            elif op.value == '<=':
                 return left_value <= right_value
-            elif self.condition.operator == '!=':
+            elif op.value == '!=':
                 return left_value != right_value
-            
+
         return False
+
+    def _eval_expr(self, expr: Expression, row: Any) -> Any:
+        """递归解析表达式（列、常量等）"""
+        if isinstance(expr, Column):
+            return row[expr.name]  # 从行中取列值
+        elif isinstance(expr, Literal):
+            return expr.value  # 字面量直接返回
+        elif isinstance(expr, BinaryExpression):
+            # 递归支持复杂条件，例如 (age > 20 AND id < 10)
+            return self._evaluate_condition(row)
+        else:
+            raise NotImplementedError(f"Unsupported expression type: {expr}")

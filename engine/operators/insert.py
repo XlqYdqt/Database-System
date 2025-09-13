@@ -49,7 +49,7 @@ class InsertOperator:
                 if isinstance(val, Literal):
                     val = val.value
                 encoded = val.encode("utf-8")
-                row_data.extend(len(encoded).to_bytes(2, "little"))
+                row_data.extend(len(encoded).to_bytes(4, "little"))
                 row_data.extend(encoded)
             elif col_type == "FLOAT":
                 # Check if val is a Literal object and extract its value
