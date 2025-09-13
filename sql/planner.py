@@ -32,15 +32,13 @@ class Filter(LogicalPlan):
         return f"Filter(condition={self.condition}) -> {self.child}"
 
 
-class ProjectOperator(LogicalPlan):
-    """投影操作符，选择指定列"""
-
+class Project(LogicalPlan):
     def __init__(self, columns: List[Expression], child: LogicalPlan):
-        self.columns = columns  # 选择的列
-        self.child = child  # 子操作符
+        self.columns = columns
+        self.child = child
 
     def __repr__(self):
-        return f"ProjectOperator(columns={self.columns}) -> {self.child}"
+        return f"Project(columns={self.columns}) -> {self.child}"
 
 
 class Insert(LogicalPlan):
@@ -211,7 +209,7 @@ class Planner:
         plan = SeqScan(statement.table_name)
         if statement.where:
             plan = Filter(statement.where, plan)
-        plan = ProjectOperator(statement.columns, plan)
+        plan = Project(statement.columns, plan)
         return plan
 
     def plan_update(self, statement: UpdateStatement) -> Update:
