@@ -1,6 +1,5 @@
 from typing import Any, List, Tuple, Dict, Optional
 
-
 from engine.storage_engine import StorageEngine
 from sql.ast import Operator, Expression, Column, Literal, BinaryExpression, DataType, ColumnConstraint, \
     ColumnDefinition
@@ -51,25 +50,34 @@ class DeleteOperator(Operator):
             # --- 回退路径：全表扫描 ---
             rows_to_delete = self.executor.execute(self.child)
 
-        # 后续的删除逻辑保持不变...
+        # 后续的删除逻辑
         for rid, row_data_dict in rows_to_delete:
-            try:
-                # [ATOMICITY] 操作重排：先处理索引，再处理数据，保证操作的原子性。
-                if self.bplus_tree:
-                    pk_col_def, _ = self.storage_engine._get_pk_info(schema)
-                    pk_value = row_data_dict[pk_col_def.name]
-                    pk_bytes_to_delete = self.storage_engine._prepare_key_for_b_tree(pk_value, pk_col_def.data_type)
+            pk_col_def, _ = self.storage_engine._get_pk_info(schema)
+            pk_value = row_data_dict[pk_col_def.name]
+            pk_bytes_to_delete = self.storage_engine._prepare_key_for_b_tree(pk_value, pk_col_def.data_type)
+            index_deleted = False
 
+            try:
+                # 1. 先删除索引
+                if self.bplus_tree:
                     root_changed = self.bplus_tree.delete(pk_bytes_to_delete)
+                    index_deleted = True
                     if root_changed:
                         self.storage_engine.update_index_root(self.table_name, self.bplus_tree.root_page_id)
 
+                # 2. 再删除数据行
                 success = self.storage_engine.delete_row_by_rid(self.table_name, rid)
 
                 if success:
                     deleted_count += 1
             except Exception as e:
-                print(f"警告：删除行 {rid} 时发生错误并已跳过: {e}")
+                # 【ATOMICITY FIX】如果第2步（删除数据）失败，但第1步（删除索引）已成功
+                # 那么我们需要回滚第1步的操作，以保证数据一致性。
+                if index_deleted:
+                    # 尝试将刚才删除的索引重新插回去
+                    self.bplus_tree.insert(pk_bytes_to_delete, rid)
+
+                print(f"警告：删除行 {rid} 时发生错误并已跳过（已尝试回滚索引）: {e}")
                 continue
 
         return [deleted_count]
@@ -105,4 +113,3 @@ class DeleteOperator(Operator):
             value, offset = self.storage_engine._decode_value(row_bytes, offset, col_def.data_type)
             row_dict[col_def.name] = value
         return row_dict
-
