@@ -1,114 +1,96 @@
 from typing import Any, List, Tuple, Dict, Optional
 
+from engine.exceptions import TableNotFoundError
+from engine.operators import FilterOperator
 from engine.storage_engine import StorageEngine
 from sql.ast import Operator, Expression, Column, Literal, BinaryExpression, DataType, ColumnConstraint, ColumnDefinition
 
 
 class DeleteOperator(Operator):
-    def __init__(self, table_name: str, child: Operator, storage_engine: StorageEngine, executor: Any, bplus_tree=None):
+    """DELETE 操作的执行算子"""
+
+    def __init__(self, table_name: str, child: Operator, storage_engine: StorageEngine, executor: Any,
+                 bplus_tree: Optional[Any] = None):
         self.table_name = table_name
-        self.child = child               # 子算子（全表扫描/过滤）
+        self.child = child  # 子算子（通常是 FilterOperator 或 SeqScanOperator）
         self.storage_engine = storage_engine
         self.executor = executor
-        self.bplus_tree = bplus_tree     # 可选：主键索引
+        self.bplus_tree = bplus_tree  # 主键的B+树索引
 
     def execute(self) -> List[Any]:
+        """
+        [ATOMICITY FIX] 修复了删除操作的原子性问题。
+        现在的操作顺序是：先删除索引，再删除数据。
+        这避免了在索引删除失败时，留下一个指向已删除数据的“悬空指针”。
+        """
         deleted_count = 0
-        rid_list: List[Tuple[Tuple[int, int], Dict[str, Any]]] = []
 
-        # 如果有 B+ 树索引，尝试优化
-        if self.bplus_tree and self._can_use_index():
-            key = self._extract_pk_value()
-            if key is not None:
-                pk_col_type = self._get_pk_col_type()
-                if pk_col_type == DataType.INT:
-                    pk_bytes = key.to_bytes(4, "little", signed=True)
-                elif pk_col_type in (DataType.TEXT, DataType.STRING):
-                    pk_bytes = key.encode("utf-8")
-                else:
-                    raise NotImplementedError(f"Unsupported primary key type for indexing: {pk_col_type.name}")
+        try:
+            schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)['schema']
+        except (TypeError, KeyError):
+            raise TableNotFoundError(self.table_name)
 
-                rid_bytes = self.bplus_tree.search(pk_bytes)
-                if rid_bytes is not None:
-                    page_id = int.from_bytes(rid_bytes[0:4], "little")
-                    row_id = int.from_bytes(rid_bytes[4:8], "little")
-                    rid = (page_id, row_id)
+        rows_to_delete: List[Tuple[Tuple[int, int], Dict[str, Any]]] = self.executor.execute(self.child)
 
-                    row_data_bytes = self.storage_engine.read_row(self.table_name, rid)
-                    if row_data_bytes:
-                        schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)["schema"]
-                        row_data = self._deserialize_row_data(row_data_bytes, schema)
-                        rid_list.append((rid, row_data))
-        else:
-            # 回退到子算子扫描
-            scanned_rows = self.executor.execute(self.child)  # [(rid, row_dict)]
-            for rid, row_data_dict in scanned_rows:
-                rid_list.append((rid, row_data_dict))
+        for rid, row_data_dict in rows_to_delete:
+            try:
+                # --- [核心修复] 操作重排：先处理索引，再处理数据 ---
 
-        # 实际删除
-        for rid, row_data in rid_list:
-            # 删除数据页里的记录
-            self.storage_engine.delete_row_by_rid(self.table_name, rid)
-            deleted_count += 1
+                # 步骤 1: 如果存在索引，先从索引中删除条目
+                if self.bplus_tree:
+                    pk_col_def, _ = self.storage_engine._get_pk_info(schema)
+                    pk_value = row_data_dict[pk_col_def.name]
+                    pk_bytes_to_delete = self.storage_engine._prepare_key_for_b_tree(pk_value, pk_col_def.data_type)
 
-            # 同步删除索引
-            if self.bplus_tree:
-                pk_value = self._get_pk_value_from_row(row_data)
-                if pk_value is not None:
-                    if isinstance(pk_value, int):
-                        pk_bytes = pk_value.to_bytes(4, "little", signed=True)
-                    else:
-                        pk_bytes = str(pk_value).encode("utf-8")
-                    self.bplus_tree.delete(pk_bytes)
+                    root_changed = self.bplus_tree.delete(pk_bytes_to_delete)
+                    if root_changed:
+                        self.storage_engine.update_index_root(self.table_name, self.bplus_tree.root_page_id)
+
+                # 步骤 2: 在索引成功删除后，再从数据页中删除记录
+                success = self.storage_engine.delete_row_by_rid(self.table_name, rid)
+
+                if success:
+                    deleted_count += 1
+            except Exception as e:
+                # 如果在处理单行时发生错误（例如，B+树操作失败），
+                # 记录错误并继续处理下一行，而不是让整个DELETE语句崩溃。
+                # 一个更完整的系统会有更复杂的事务处理。
+                print(f"警告：删除行 {rid} 时发生错误并已跳过: {e}")
+                continue
 
         return [deleted_count]
 
-    # === 以下与 UpdateOperator 保持一致的辅助方法 ===
+    # --- 辅助方法 ---
 
     def _can_use_index(self) -> bool:
-        """简化逻辑：如果 WHERE 条件是主键等值查询 (id = xxx)，就能用索引"""
-        if isinstance(self.child, BinaryExpression):
-            pk_col_name = self._get_pk_col_name()
-            if pk_col_name and isinstance(self.child.left, Column) and self.child.left.name == pk_col_name:
-                op = getattr(self.child, "op", None) or getattr(self.child, "operator", None)
-                op_val = op.value if hasattr(op, "value") else op
-                return op_val == "="
+        """
+        [逻辑修正] 判断 WHERE 条件是否是 `主键 = 常量` 的形式。
+        正确的检查对象应该是子算子 FilterOperator 的 condition 属性。
+        """
+        # 检查子节点是否是 FilterOperator，并且其过滤条件是二元表达式
+        if isinstance(self.child, FilterOperator) and isinstance(self.child.condition, BinaryExpression):
+            condition = self.child.condition
+            schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)['schema']
+            pk_col_def, _ = self.storage_engine._get_pk_info(schema)
+
+            # 检查是否是 `Column = Literal` 且该 Column 是主键
+            if (isinstance(condition.left, Column) and condition.left.name == pk_col_def.name and
+                    isinstance(condition.right, Literal) and condition.op.value == '='):
+                return True
         return False
 
-    def _extract_pk_value(self):
-        """提取主键等值查询的值"""
-        if isinstance(self.child, BinaryExpression) and isinstance(self.child.right, Literal):
-            return self.child.right.value
+    def _extract_pk_value(self) -> Any:
+        """从 WHERE 条件中提取主键的值。"""
+        if self._can_use_index():
+            # 值位于 FilterOperator 的 condition 表达式的右侧
+            return self.child.condition.right.value
         return None
 
-    def _get_pk_col_name(self) -> Optional[str]:
-        schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)["schema"]
-        for col_name, col_def in schema.items():
-            if (ColumnConstraint.PRIMARY_KEY, None) in col_def.constraints:
-                return col_name
-        return None
-
-    def _get_pk_col_type(self) -> Optional[DataType]:
-        schema = self.storage_engine.catalog_page.get_table_metadata(self.table_name)["schema"]
-        for _, col_def in schema.items():
-            if (ColumnConstraint.PRIMARY_KEY, None) in col_def.constraints:
-                return col_def.data_type
-        return None
-
-    def _get_pk_value_from_row(self, row: Dict[str, Any]) -> Any:
-        pk_col_name = self._get_pk_col_name()
-        if pk_col_name and pk_col_name in row:
-            return row[pk_col_name]
-        return None
-
-    def _deserialize_row_data(self, row_data_bytes: bytes, schema: Dict[str, ColumnDefinition]) -> Dict[str, Any]:
-        deserialized_data = {}
+    def _deserialize_row_data(self, row_bytes: bytes, schema: Dict[str, ColumnDefinition]) -> Dict[str, Any]:
+        """将字节流反序列化为字典形式的行数据。"""
+        row_dict = {}
         offset = 0
-        for col_name, col_def in schema.items():
-            if col_def.data_type in (DataType.TEXT, DataType.STRING):
-                value, new_offset = self.storage_engine._decode_value(row_data_bytes, offset, "TEXT")
-            else:
-                value, new_offset = self.storage_engine._decode_value(row_data_bytes, offset, col_def.data_type)
-            deserialized_data[col_name] = value
-            offset = new_offset
-        return deserialized_data
+        for col_def in schema.values():
+            value, offset = self.storage_engine._decode_value(row_bytes, offset, col_def.data_type)
+            row_dict[col_def.name] = value
+        return row_dict

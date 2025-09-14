@@ -1,152 +1,132 @@
 # data_page.py
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from engine.constants import PAGE_SIZE, ROW_LENGTH_PREFIX_SIZE
 
 
 class DataPage:
+    """数据页（DataPage），负责存储表的实际行记录。"""
+
     def __init__(self, page_id: int, data: bytes = b''):
         self.page_id = page_id
-        # If data is provided and consists only of null bytes, treat it as an empty page.
-        # This is crucial for correctly initializing pages read from disk that might be all zeros.
-        if data and data == b'\x00' * len(data):
-            self.data = bytearray(PAGE_SIZE)
-            self.free_space_pointer = 0
-        else:
-            self.data = bytearray(data) if data else bytearray(PAGE_SIZE)
-            self.free_space_pointer = len(data) if data else 0
+        self.data = bytearray(data) if data else bytearray(PAGE_SIZE)
 
-    def get_free_space(self) -> int:
-        return PAGE_SIZE - self.free_space_pointer
+        # [优化] 通过扫描页面来确定真实的空闲空间指针，而不是简单地取len(data)
+        # 这使得页面布局的管理更加健壮。
+        self.free_space_pointer = self._calculate_free_space_pointer()
 
-    def is_full(self) -> bool:
-        return self.get_free_space() == 0
+    def _calculate_free_space_pointer(self) -> int:
+        """扫描页面以找到第一个可用的空闲空间起始位置。"""
+        offset = 0
+        while offset < PAGE_SIZE:
+            # 如果剩余空间不足以读取一个长度前缀，说明已到末尾
+            if offset + ROW_LENGTH_PREFIX_SIZE > PAGE_SIZE:
+                return offset
 
-    def insert_record(self, record_data: bytes) -> int:
-        from engine.constants import ROW_LENGTH_PREFIX_SIZE
+            record_len = int.from_bytes(self.data[offset:offset + ROW_LENGTH_PREFIX_SIZE], "little")
 
-        row_length = len(record_data)
-        total_size = ROW_LENGTH_PREFIX_SIZE + row_length
+            # 遇到第一个长度为0的记录，且后面都是0，说明这是空闲空间的开始
+            if record_len == 0:
+                return offset
 
-        if self.get_free_space() < total_size:
-            raise ValueError("Not enough free space on page")
-
-        offset = self.free_space_pointer
-        # 写入记录长度前缀（行级）
-        self.data[offset:offset + ROW_LENGTH_PREFIX_SIZE] = row_length.to_bytes(
-            ROW_LENGTH_PREFIX_SIZE, "little"
-        )
-        # 写入记录本体
-        self.data[offset + ROW_LENGTH_PREFIX_SIZE: offset + total_size] = record_data
-
-        self.free_space_pointer += total_size
+            offset += record_len
         return offset
 
-    def update_record(self, offset: int, new_row_bytes: bytes) -> Tuple[int, bool]:
-        """
-        更新一条记录。
+    def get_free_space(self) -> int:
+        """返回页面中剩余的可用空间大小。"""
+        return PAGE_SIZE - self.free_space_pointer
 
-        :param offset: 记录起始偏移（指向长度前缀的起始位置）
-        :param new_row_bytes: 不含长度前缀的记录内容 bytes
-        :return: (new_offset, moved)
-                 new_offset: 记录最终所在位置（如果未移动则等于 offset）
-                 moved: 如果为 True 表示记录被移到了页尾（offset 无效，需要上层更新 RID/index）
-        可能抛出 IndexError/ValueError（越界或空间不足）
+    def insert_record(self, record_data: bytes) -> int:
+        """在页面末尾插入一条新记录。"""
+        if self.get_free_space() < len(record_data):
+            raise ValueError("页面空间不足，无法插入记录。")
+        offset = self.free_space_pointer
+        self.data[offset:offset + len(record_data)] = record_data
+        self.free_space_pointer += len(record_data)
+        return offset
+
+    def update_record(self, offset: int, new_record: bytes) -> Tuple[int, bool]:
         """
-        # 边界检查：必须能读取旧的长度前缀
+        更新指定偏移量的记录。
+        - 如果新记录不长于旧记录，则原地更新。
+        - 如果新记录更长，则将旧记录标记为删除，并在页面末尾插入新记录。
+        返回 (最终记录的偏移量, 是否发生移动)。
+        """
         if offset < 0 or offset + ROW_LENGTH_PREFIX_SIZE > len(self.data):
-            raise IndexError("Invalid record offset")
+            raise IndexError("无效的记录偏移量。")
 
-        # 读取旧记录长度（行级，不含前缀）
-        existing_length = int.from_bytes(
-            self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE], "little"
-        )
-        existing_total = ROW_LENGTH_PREFIX_SIZE + existing_length
+        # [修正] 读取旧记录的完整长度（包括长度前缀）
+        existing_total_length = int.from_bytes(self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE], "little")
 
-        new_length = len(new_row_bytes)
-        new_total = ROW_LENGTH_PREFIX_SIZE + new_length
+        # 情形A: 新记录长度小于等于旧记录，可以原地更新
+        if len(new_record) <= existing_total_length:
+            self.data[offset:offset + len(new_record)] = new_record
+            # 将旧记录剩余的部分用空字节覆盖，防止脏数据
+            zero_start = offset + len(new_record)
+            zero_end = offset + existing_total_length
+            self.data[zero_start:zero_end] = b'\0' * (zero_end - zero_start)
+            return offset, False  # 未移动
 
-        # 情形 A：新长度小于等于旧长度 -> 原地写入（覆盖），并将多余字节清0
-        if new_length <= existing_length:
-            # 写长度前缀
-            self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE] = new_length.to_bytes(
-                ROW_LENGTH_PREFIX_SIZE, "little"
-            )
-            # 写数据
-            start = offset + ROW_LENGTH_PREFIX_SIZE
-            self.data[start: start + new_length] = new_row_bytes
-            # 将旧记录剩余的字节置0（避免残留内容被误读）
-            for i in range(start + new_length, offset + existing_total):
-                self.data[i] = 0
-            # free_space_pointer 不变
-            return offset, False
+        # 情形B: 新记录更长，需要移动
+        if self.get_free_space() < len(new_record):
+            raise ValueError("页面空间不足，无法更新记录。")
 
-        # 情形 B：新长度大于旧长度 -> 尝试在页尾追加（并将原记录逻辑删除）
-        extra_needed = new_total - existing_total
-        if self.get_free_space() < new_total:
-            # 尝试判断：如果释放掉旧记录空间（将其标记为 deleted）是否足够 —— 这里我们选择不回收旧空间立即复用，
-            # 因为回收需要移动后续记录或维护空闲链表，比较复杂。直接失败或让上层决定页分裂。
-            raise ValueError("Not enough free space on page for in-place expansion; need page split or compaction")
+        # 将原记录标记为已删除（长度置0）
+        self.delete_record(offset)
 
-        # 标记原记录为删除（长度置 0）
-        self.data[offset: offset + ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(ROW_LENGTH_PREFIX_SIZE, "little")
-
-        # 在页尾写入新的记录（带长度前缀）
-        new_offset = self.free_space_pointer
-        self.data[new_offset: new_offset + ROW_LENGTH_PREFIX_SIZE] = new_length.to_bytes(
-            ROW_LENGTH_PREFIX_SIZE, "little"
-        )
-        start = new_offset + ROW_LENGTH_PREFIX_SIZE
-        self.data[start: start + new_length] = new_row_bytes
-
-        # 更新 free_space_pointer
-        self.free_space_pointer += new_total
-
-        return new_offset, True
+        # 在页面末尾插入新记录
+        new_offset = self.insert_record(new_record)
+        return new_offset, True  # 已移动
 
     def get_data(self) -> bytes:
+        """返回页面的字节数据。"""
         return bytes(self.data)
 
-    def get_page_id(self) -> int:
-        return self.page_id
-
     def get_all_records(self) -> List[Tuple[int, bytes]]:
-        """迭代页面中的所有记录，返回 (offset, record_data)，自动跳过填充的0"""
-        from engine.constants import ROW_LENGTH_PREFIX_SIZE
-
+        """遍历并返回页面中所有有效的记录。"""
         records = []
         current_offset = 0
-
-        while current_offset + ROW_LENGTH_PREFIX_SIZE <= self.free_space_pointer:
-            # 读取记录长度前缀
-            row_length = int.from_bytes(
-                self.data[current_offset: current_offset + ROW_LENGTH_PREFIX_SIZE],
-                "little"
-            )
-
-            if row_length == 0:
-                # 检查后面是否全是填充的 0
-                if all(b == 0 for b in self.data[current_offset: self.free_space_pointer]):
-                    break  # 已经进入填充区，直接退出
-                else:
-                    # 真的是逻辑删除的行，只跳过前缀
-                    current_offset += ROW_LENGTH_PREFIX_SIZE
-                    continue
-
-            data_start_offset = current_offset + ROW_LENGTH_PREFIX_SIZE
-            data_end_offset = data_start_offset + row_length
-
-            # 如果越界，说明后面都是填充的0，直接退出
-            if data_end_offset > len(self.data):
+        while current_offset < self.free_space_pointer:
+            if current_offset + ROW_LENGTH_PREFIX_SIZE > self.free_space_pointer:
                 break
 
-            record_data = self.data[data_start_offset: data_end_offset]
+            record_length = int.from_bytes(self.data[current_offset: current_offset + ROW_LENGTH_PREFIX_SIZE], "little")
 
-            # 如果记录全是 0，说明是填充，直接退出循环
-            if all(b == 0 for b in record_data):
+            # [修正] 如果记录长度为0，说明是已删除记录或填充区，应跳过并继续扫描
+            if record_length == 0:
+                # 找到下一个非零字节，作为可能的下一条记录的开始
+                # 这是一个简化的处理方式，更复杂的系统会使用槽位图（slot directory）
+                next_offset = current_offset + 1
+                while next_offset < self.free_space_pointer and self.data[next_offset] == 0:
+                    next_offset += 1
+
+                # 如果后面全是0，则扫描结束
+                if next_offset >= self.free_space_pointer:
+                    break
+                current_offset = next_offset
+                continue
+
+            record_end = current_offset + record_length
+            if record_end > self.free_space_pointer:
+                # 记录长度异常，可能数据损坏，终止扫描
                 break
 
-            records.append((current_offset, bytes(record_data)))
-            current_offset = data_end_offset
-
+            records.append((current_offset, bytes(self.data[current_offset:record_end])))
+            current_offset = record_end
         return records
+
+    def get_record(self, offset: int) -> Optional[bytes]:
+        """获取指定偏移量的单条记录。"""
+        if offset < 0 or offset + ROW_LENGTH_PREFIX_SIZE > len(self.data):
+            return None
+        record_length = int.from_bytes(self.data[offset:offset + ROW_LENGTH_PREFIX_SIZE], "little")
+        if record_length == 0:  # 已删除或无效记录
+            return None
+        return self.data[offset:offset + record_length]
+
+    def delete_record(self, offset: int) -> bool:
+        """逻辑删除一条记录（通过将其长度置0），不回收空间。"""
+        if offset < 0 or offset + ROW_LENGTH_PREFIX_SIZE > len(self.data):
+            return False
+        self.data[offset:offset + ROW_LENGTH_PREFIX_SIZE] = (0).to_bytes(ROW_LENGTH_PREFIX_SIZE, "little")
+        return True
