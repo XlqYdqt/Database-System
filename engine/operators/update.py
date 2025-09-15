@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Tuple, Optional
+import struct
 
 # [FIX] 移除了未使用的 FilterOperator 导入
 # from engine.operators import FilterOperator
@@ -154,6 +155,11 @@ class UpdateOperator(Operator):
                 encoded = str(val).encode("utf-8")
                 row_data.extend(len(encoded).to_bytes(4, "little"))
                 row_data.extend(encoded)
+            # --- [BUG FIX] ---
+            # 添加了对 FLOAT 类型的处理，之前缺失导致数据序列化不完整。
+            elif col_def.data_type == DataType.FLOAT:
+                row_data.extend(struct.pack("<f", float(val)))
+            # --- [END FIX] ---
         return bytes(row_data)
 
     def _deserialize_row_data(self, row_bytes: bytes, schema: Dict[str, ColumnDefinition]) -> Dict[str, Any]:
@@ -164,4 +170,3 @@ class UpdateOperator(Operator):
             value, offset = self.storage_engine._decode_value(row_bytes, offset, col_def.data_type)
             row_dict[col_def.name] = value
         return row_dict
-
