@@ -11,7 +11,7 @@ from typing import List, Any, Dict, Optional
 class InsertOperator:
     """INSERT 操作的执行算子"""
 
-    def __init__(self, table_name: str, values: List[object], storage_engine: StorageEngine, txn_id: Optional[int] = None):
+    def __init__(self, table_name: str, values: List[List[object]], storage_engine: StorageEngine, txn_id: Optional[int] = None):
         self.table_name = table_name
         self.values = values
         self.storage_engine = storage_engine
@@ -26,7 +26,9 @@ class InsertOperator:
             raise RuntimeError(f"无法找到表 '{self.table_name}' 的 schema。")
         schema = metadata['schema']
 
-        row_data_bytes = self._encode_tuple(self.values, schema)
+        # 处理多行插入
+        for row_values in self.values:
+            row_data_bytes = self._encode_tuple(row_values, schema)
 
         # [FIX] 使用 try...except 块来捕获并处理来自存储引擎的特定错误
         try:

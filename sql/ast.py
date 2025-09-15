@@ -65,6 +65,16 @@ class Operator:
     def __str__(self):
         return self.value
 
+    def __eq__(self, other):
+        if isinstance(other, Operator):
+            return self.value == other.value
+        elif isinstance(other, str):
+            return self.value == other
+        return False
+
+    def __hash__(self):
+        return hash(self.value)
+
 
 class JoinType(Enum):
     """连接类型"""
@@ -209,6 +219,48 @@ class Expression:
     pass
 
 
+class BetweenExpression(Expression):
+    """BETWEEN表达式"""
+
+    def __init__(self, expression: Expression, lower: Expression, upper: Expression):
+        self.expression = expression
+        self.lower = lower
+        self.upper = upper
+
+    def __repr__(self):
+        return f"BetweenExpression(expression={self.expression}, lower={self.lower}, upper={self.upper})"
+
+
+class InExpression(Expression):
+    """IN表达式"""
+
+    def __init__(self, expression: Expression, values: Union[List[Expression], 'SelectStatement']):
+        self.expression = expression
+        self.values = values  # 可以是值列表或子查询
+
+    def __repr__(self):
+        return f"InExpression(expression={self.expression}, values={self.values})"
+
+
+class ExistsExpression(Expression):
+    """EXISTS表达式"""
+
+    def __init__(self, subquery: 'SelectStatement'):
+        self.subquery = subquery
+
+    def __repr__(self):
+        return f"ExistsExpression(subquery={self.subquery})"
+
+
+class AliasExpression(Expression):
+    """带别名的表达式"""
+
+    def __init__(self, expression: Expression, alias: str):
+        self.expression = expression
+        self.alias = alias
+
+    def __repr__(self):
+        return f"AliasExpression(expression={self.expression}, alias={self.alias})"
 class Column(Expression):
     """列引用表达式"""
 
@@ -289,8 +341,9 @@ class CaseExpression(Expression):
 
     def __repr__(self):
         base_str = f"{self.base_expression} " if self.base_expression else ""
+        when_then_str = ", ".join([f"WHEN {w} THEN {t}" for w, t in self.when_then_pairs])
         else_str = f" ELSE {self.else_expression}" if self.else_expression else ""
-        return f"CaseExpression({base_str}{self.when_then_pairs}{else_str})"
+        return f"CaseExpression({base_str}{when_then_str}{else_str})"
 
 
 class SubqueryExpression(Expression):
@@ -324,19 +377,19 @@ class WindowClause:
         return f"WindowClause({' '.join(parts)})"
 
 
-class JoinClause:
-    """连接子句"""
-
-    def __init__(self, table: Union[str, 'SelectStatement'], join_type: JoinType, condition: Optional[Expression] = None,
-                 alias: Optional[str] = None):
-        self.table = table
-        self.join_type = join_type
-        self.condition = condition
-        self.alias = alias
-
-    def __repr__(self):
-        alias_str = f" AS {self.alias}" if self.alias else ""
-        return f"JoinClause(table={self.table}{alias_str}, type={self.join_type.value}, condition={self.condition})"
+# class JoinClause:
+#     """连接子句"""
+#
+#     def __init__(self, table: Union[str, 'SelectStatement'], join_type: JoinType, condition: Optional[Expression] = None,
+#                  alias: Optional[str] = None):
+#         self.table = table
+#         self.join_type = join_type
+#         self.condition = condition
+#         self.alias = alias
+#
+#     def __repr__(self):
+#         alias_str = f" AS {self.alias}" if self.alias else ""
+#         return f"JoinClause(table={self.table}{alias_str}, type={self.join_type.value}, condition={self.condition})"
 
 
 class TableConstraint:
@@ -369,8 +422,8 @@ class CreateTableStatement(Statement):
                  table_name: str,
                  columns: List[ColumnDefinition],
                  constraints: Optional[List[TableConstraint]] = None,
-                 if_not_exists: bool = False,
-                 temporary: bool = False):
+                 if_not_exists: bool = False,  # 添加 if_not_exists 参数
+                 temporary: bool = False):  # 添加 temporary 参数
         self.table_name = table_name
         self.columns = columns
         self.constraints = constraints if constraints else []
@@ -383,7 +436,6 @@ class CreateTableStatement(Statement):
         constraints_str = f", constraints={self.constraints}" if self.constraints else ""
         return f"CreateTableStatement({temp_str}table={self.table_name}{exists_str}, columns={self.columns}{constraints_str})"
 
-
 class CreateIndexStatement(Statement):
     """CREATE INDEX语句"""
 
@@ -391,7 +443,7 @@ class CreateIndexStatement(Statement):
                  index_name: str,
                  table_name: str,
                  columns: List[str],
-                 unique: bool = False,
+                 unique: bool = False,  # 添加 unique 参数
                  index_type: Optional[IndexType] = None,
                  where_clause: Optional[Expression] = None,
                  concurrently: bool = False,
@@ -402,7 +454,7 @@ class CreateIndexStatement(Statement):
         self.unique = unique
         self.index_type = index_type
         self.where_clause = where_clause
-        self.concurrently = concurrently  # 并发创建索引
+        self.concurrently = concurrently
         self.if_not_exists = if_not_exists
 
     def __repr__(self):
@@ -412,7 +464,6 @@ class CreateIndexStatement(Statement):
         type_str = f" USING {self.index_type.value}" if self.index_type else ""
         where_str = f" WHERE {self.where_clause}" if self.where_clause else ""
         return f"CreateIndexStatement({concurrent_str}{unique_str}{exists_str}index={self.index_name}, table={self.table_name}, columns={self.columns}{type_str}{where_str})"
-
 class DropIndexStatement(Statement):
     """DROP INDEX语句"""
 
@@ -431,29 +482,17 @@ class DropIndexStatement(Statement):
         concurrent_str = " CONCURRENTLY" if self.concurrently else ""
         return f"DropIndexStatement(index={self.index_name}{exists_str}{concurrent_str})"
 
-class InsertStatement(Statement):
-    """INSERT语句"""
 
-    def __init__(self,
-                 table_name: str,
-                 columns: List[str],
-                 values: List[Expression],
-                 on_conflict: Optional[Tuple[List[str], str]] = None,  # (冲突列, 解决动作)
-                 returning: Optional[List[Expression]] = None,
-                 with_clause: Optional['WithClause'] = None):
-        self.table_name = table_name
-        self.columns = columns
-        self.values = values
-        self.on_conflict = on_conflict  # 冲突处理策略
-        self.returning = returning if returning else []  # RETURNING子句
-        self.with_clause = with_clause  # CTE支持
+class Join:
+    """JOIN子句"""
+
+    def __init__(self, join_type: str, table: str, condition: Expression):
+        self.join_type = join_type  # INNER, LEFT, RIGHT, FULL, CROSS
+        self.table = table
+        self.condition = condition
 
     def __repr__(self):
-        conflict_str = f", on_conflict={self.on_conflict}" if self.on_conflict else ""
-        returning_str = f", returning={self.returning}" if self.returning else ""
-        with_str = f", with={self.with_clause}" if self.with_clause else ""
-        return f"InsertStatement(table={self.table_name}, columns={self.columns}, values={self.values}{conflict_str}{returning_str}{with_str})"
-
+        return f"Join(type={self.join_type}, table={self.table}, condition={self.condition})"
 
 class WithClause:
     """WITH子句（公共表表达式）"""
@@ -467,23 +506,69 @@ class WithClause:
         return f"WithClause({recursive_str}{self.queries})"
 
 
+class InsertStatement(Statement):
+    """INSERT语句"""
+
+    def __init__(self,
+                 table_name: str,
+                 columns: List[str],
+                 values: Optional[List[List[Expression]]] = None,  # 改为 values
+                 select_stmt: Optional['SelectStatement'] = None,
+                 on_conflict: Optional[Tuple[List[str], str]] = None,
+                 returning: Optional[List[Expression]] = None,
+                 with_clause: Optional[WithClause] = None):
+        self.table_name = table_name
+        self.columns = columns
+        self.values = values if values else []  # 改为 values
+        self.select_stmt = select_stmt
+        self.on_conflict = on_conflict
+        self.returning = returning if returning else []
+        self.with_clause = with_clause
+
+    # 不再需要 values_list 属性
+    # 但如果您有其他代码使用 values_list，可以添加一个属性别名
+    @property
+    def values_list(self):
+        """values_list属性作为values的别名"""
+        return self.values
+
+    # 其余代码保持不变...
+    def __repr__(self):
+        conflict_str = f", on_conflict={self.on_conflict}" if self.on_conflict else ""
+        returning_str = f", returning={self.returning}" if self.returning else ""
+        with_str = f", with={self.with_clause}" if self.with_clause else ""
+        select_str = f", select={self.select_stmt}" if self.select_stmt else ""
+        values_str = f", values={self.values_list}" if self.values_list else ""
+        return f"InsertStatement(table={self.table_name}, columns={self.columns}{values_str}{select_str}{conflict_str}{returning_str}{with_str})"
+
+
+
+class OrderByClause:
+    """ORDER BY子句"""
+
+    def __init__(self, expression: Expression, direction: str = 'ASC'):
+        self.expression = expression
+        self.direction = direction  # ASC 或 DESC
+
+    def __repr__(self):
+        return f"OrderByClause(expression={self.expression}, direction={self.direction})"
 class SelectStatement(Statement):
     """SELECT语句"""
 
     def __init__(self,
                  columns: List[Expression],
                  table_name: Optional[str] = None,
-                 joins: Optional[List[JoinClause]] = None,
+                 joins: Optional[List['Join']] = None,  # 修改为使用 Join 类
                  where: Optional[Expression] = None,
                  group_by: Optional[List[Expression]] = None,
                  having: Optional[Expression] = None,
-                 order_by: Optional[List[Tuple[Expression, str]]] = None,  # (expression, direction)
+                 order_by: Optional[List[OrderByClause]] = None,  # 修改为使用 OrderByClause
                  limit: Optional[Union[int, Expression]] = None,
                  offset: Optional[Union[int, Expression]] = None,
                  distinct: bool = False,
                  for_update: Optional[LockMode] = None,
                  with_clause: Optional[WithClause] = None,
-                 hint: Optional[Dict[str, Any]] = None):  # 查询优化提示
+                 hint: Optional[Dict[str, Any]] = None):
         self.columns = columns
         self.table_name = table_name
         self.joins = joins if joins else []
@@ -494,9 +579,9 @@ class SelectStatement(Statement):
         self.limit = limit
         self.offset = offset
         self.distinct = distinct
-        self.for_update = for_update  # 用于并发控制
-        self.with_clause = with_clause  # CTE支持
-        self.hint = hint if hint else {}  # 查询优化提示
+        self.for_update = for_update
+        self.with_clause = with_clause
+        self.hint = hint if hint else {}
 
     def __repr__(self):
         distinct_str = "DISTINCT " if self.distinct else ""
@@ -510,8 +595,6 @@ class SelectStatement(Statement):
         with_str = f", with={self.with_clause}" if self.with_clause else ""
         hint_str = f", hint={self.hint}" if self.hint else ""
         return f"SelectStatement({distinct_str}columns={self.columns}, table={self.table_name}{join_str}, where={self.where}{group_str}{having_str}{order_str}{limit_str}{offset_str}{for_update_str}{with_str}{hint_str})"
-
-
 class UpdateStatement(Statement):
     """UPDATE语句"""
 
@@ -519,7 +602,7 @@ class UpdateStatement(Statement):
                  table_name: str,
                  assignments: Dict[str, Expression],
                  where: Optional[Expression] = None,
-                 from_clause: Optional[List[Union[str, JoinClause]]] = None,
+                 from_clause: Optional[List[Union[str, Join]]] = None,
                  returning: Optional[List[Expression]] = None,
                  with_clause: Optional[WithClause] = None):
         self.table_name = table_name
@@ -542,7 +625,7 @@ class DeleteStatement(Statement):
     def __init__(self,
                  table_name: str,
                  where: Optional[Expression] = None,
-                 using: Optional[List[Union[str, JoinClause]]] = None,
+                 using: Optional[List[Union[str, Join]]] = None,
                  returning: Optional[List[Expression]] = None,
                  with_clause: Optional[WithClause] = None):
         self.table_name = table_name
@@ -636,7 +719,7 @@ class RevokeStatement(Statement):
                  object_type: ObjectType,
                  object_name: str,
                  grantees: List[str],
-                 grant_option: bool = False,
+                 grant_option: bool = False,  # 添加 grant_option 参数
                  columns: Optional[List[str]] = None):
         self.privileges = privileges
         self.object_type = object_type
@@ -649,8 +732,6 @@ class RevokeStatement(Statement):
         option_str = " GRANT OPTION FOR" if self.grant_option else ""
         columns_str = f"({', '.join(self.columns)})" if self.columns else ""
         return f"RevokeStatement({option_str}privileges={[p.value for p in self.privileges]}, object={self.object_type.value} {self.object_name}{columns_str}, grantees={self.grantees})"
-
-
 class CreateRoleStatement(Statement):
     """创建角色语句"""
 
