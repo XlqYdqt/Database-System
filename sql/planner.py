@@ -24,7 +24,8 @@ class SeqScan(LogicalPlan):
 
 
 class Filter(LogicalPlan):
-    def __init__(self, condition: Expression, child: LogicalPlan):
+    def __init__(self, condition: Expression, child: LogicalPlan,table_name: str):
+        self.table_name= table_name
         self.condition = condition
         self.child = child
 
@@ -217,7 +218,7 @@ class Planner:
     def plan_select(self, statement: SelectStatement) -> LogicalPlan:
         plan = SeqScan(statement.table_name)
         if statement.where:
-            plan = Filter(statement.where, plan)
+            plan = Filter(statement.where, plan ,statement.table_name)
         plan = Project(statement.columns, plan)
         return plan
 
@@ -228,7 +229,7 @@ class Planner:
 
         # 如果有WHERE条件，加入过滤算子
         if statement.where:
-            child = Filter(statement.where, child)
+            child = Filter(statement.where, child, statement.table_name)
 
         # 生成 Update 操作符，传递 child 操作符
         return Update(statement.table_name, statement.assignments, statement.where, child)
@@ -240,7 +241,7 @@ class Planner:
 
         # 如果有WHERE条件，加入过滤算子
         if statement.where:
-            child = Filter(statement.where, child)
+            child = Filter(statement.where, child, statement.table_name)
 
         # 生成 Delete 操作符，传递 child 操作符
         return Delete(statement.table_name, statement.where, child)

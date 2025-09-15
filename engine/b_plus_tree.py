@@ -117,8 +117,7 @@ class InternalPage(BPlusTreePage):
 
     def is_full(self) -> bool:
         """检查页面是否已满。"""
-        current_size = self.HEADER_SIZE + self.POINTER_SIZE + (self.num_keys * self.CELL_SIZE)
-        return current_size + self.CELL_SIZE > len(self.data)
+        return self.get_num_keys() >= self.get_max_keys()
 
     def insert(self, key, pointer: int):
         """在内部节点中插入一个新的 (键, 指针) 对，并保持键的有序性。"""
@@ -215,8 +214,7 @@ class LeafPage(BPlusTreePage):
 
     def is_full(self) -> bool:
         """检查页面是否已满。"""
-        current_size = self.LEAF_HEADER_SIZE + (self.num_keys * self.CELL_SIZE)
-        return current_size + self.CELL_SIZE > len(self.data)
+        return self.get_num_keys() >= self.get_max_keys()
 
     def insert(self, key, rid: tuple):
         """在叶子节点中插入一个新的 (键, RID) 对，并保持有序。"""
@@ -337,52 +335,47 @@ class BPlusTree:
 
     def search(self, key) -> tuple | None:
         """从B+树中查找一个键，返回其对应的RID (线程安全)。"""
-        # [FIX] 使用 INVALID_PAGE_ID 进行判断
         if self.root_page_id is None or self.root_page_id == INVALID_PAGE_ID:
             return None
+
         current_page_id = self.root_page_id
+        latch_held = False
         try:
             self._acquire_latch(current_page_id)
+            latch_held = True
+
             page_obj = self.bpm.fetch_page(current_page_id)
-            # 如果页面获取失败或为空，则无法继续
             if not page_obj or not page_obj.data:
-                self.bpm.unpin_page(current_page_id, is_dirty=False)
-                self._release_latch(current_page_id)
                 return None
 
-            # 从根节点开始向下遍历
             while True:
                 page_wrapper = BPlusTreePage(page_obj)
                 if page_wrapper.is_leaf:
-                    # 到达叶子节点，进行查找
                     leaf_wrapper = LeafPage(page_obj)
-                    rid = leaf_wrapper.lookup(key)
-                    self.bpm.unpin_page(current_page_id, is_dirty=False)
-                    self._release_latch(current_page_id)
-                    return rid
+                    return leaf_wrapper.lookup(key)
                 else:
-                    # 在内部节点，找到下一个要访问的子节点
                     internal_wrapper = InternalPage(page_obj)
                     next_page_id = internal_wrapper.lookup(key)
-                    # 释放当前节点的锁和 pin
+
                     self.bpm.unpin_page(current_page_id, is_dirty=False)
                     self._release_latch(current_page_id)
+                    latch_held = False
 
-                    # 准备访问下一个节点
                     current_page_id = next_page_id
                     self._acquire_latch(current_page_id)
+                    latch_held = True
                     page_obj = self.bpm.fetch_page(current_page_id)
+
                     if not page_obj or not page_obj.data:
-                        self._release_latch(current_page_id)
                         return None
-        except Exception as e:
-            print(f"Error during search: {e}")
-            # 发生异常时，尝试释放可能持有的锁
-            try:
-                self._release_latch(current_page_id)
-            except (threading.ThreadError, RuntimeError):
-                pass
-            return None
+        finally:
+            # 无论发生什么，都确保最后的 latch 和 pin 被释放
+            if latch_held:
+                self.bpm.unpin_page(current_page_id, is_dirty=False)
+                try:
+                    self._release_latch(current_page_id)
+                except (threading.ThreadError, RuntimeError):
+                    pass
 
     def insert(self, key, rid: tuple) -> bool | None:
         """
@@ -396,8 +389,6 @@ class BPlusTree:
             # Case 1: 树为空，创建第一个节点（根节点）
             if self.root_page_id is None or self.root_page_id == INVALID_PAGE_ID:
                 root_changed = self._start_new_tree(key, rid, context)
-                # [FIX] 关键修复：在成功创建新树后，必须调用 release_all_latches
-                # 来释放为新根节点获取的锁。
                 context.release_all_latches()
                 return root_changed
 
@@ -409,16 +400,19 @@ class BPlusTree:
             # 检查键是否已存在
             if leaf_page_wrapper.lookup(key) is not None:
                 context.release_all_latches()
-                # [FIX] 返回 None 表示主键冲突
                 return None
 
             # 在叶子节点中插入
             leaf_page_wrapper.insert(key, rid)
 
+            # --- 【代码修改】---
+            # 核心修复：将内存中的更改写回到页面的字节缓冲区
+            leaf_page_wrapper.serialize()
+
             # 如果叶子节点未满，操作完成
             if not leaf_page_wrapper.is_full():
                 context.release_all_latches(is_dirty_list=[True] * len(context.latched_pages_wrappers))
-                return False  # 根节点未改变
+                return False
 
             # --- 节点分裂逻辑 ---
             # 如果叶子节点已满，则进行分裂，并可能级联影响父节点
@@ -431,35 +425,40 @@ class BPlusTree:
 
         except Exception as e:
             print(f"Error during insert: {e}")
-            context.release_all_latches(is_error=True)  # 保证异常时回滚并释放所有资源
+            context.release_all_latches(is_error=True)
             return False
 
     def delete(self, key) -> bool:
         """从B+树中删除一个键及其关联的值。"""
         context = TransactionContext(self)
         try:
-            # [FIX] 使用 INVALID_PAGE_ID 进行判断
-            if self.root_page_id is None or self.root_page_id == INVALID_PAGE_ID: return False
+            if self.root_page_id is None or self.root_page_id == INVALID_PAGE_ID:
+                return False
             old_root_id = self.root_page_id
 
-            # 查找包含该键的叶子节点
             leaf_page_wrapper = self._find_leaf_for_delete_with_latching(key, context)
             if leaf_page_wrapper is None:
-                raise RuntimeError("无法找到用于删除的叶子节点。")
+                context.release_all_latches()
+                return False  # Key not found
 
-            # 从叶子节点中删除键
             if not leaf_page_wrapper.remove(key):
                 context.release_all_latches()
                 return False  # 键不存在
 
-            # 检查删除后是否发生下溢 (underflow)
-            if leaf_page_wrapper.get_num_keys() < leaf_page_wrapper.get_min_keys():
+            # --- 【代码修改】---
+            # 核心修复：将内存中的更改写回到页面的字节缓冲区
+            leaf_page_wrapper.serialize()
+
+            is_root = leaf_page_wrapper.page.page_id == self.root_page_id
+
+            if is_root and leaf_page_wrapper.get_num_keys() < leaf_page_wrapper.get_min_keys() and not (
+                    leaf_page_wrapper.is_leaf and leaf_page_wrapper.get_num_keys() > 0):
+                self._handle_underflow(leaf_page_wrapper, context)
+            elif not is_root and leaf_page_wrapper.get_num_keys() < leaf_page_wrapper.get_min_keys():
                 self._handle_underflow(leaf_page_wrapper, context)
 
-            # 标记所有修改过的页面为脏页并释放资源
             dirty_flags = [True] * len(context.latched_pages_wrappers)
             context.release_all_latches(dirty_flags)
-            # 返回根节点是否发生了变化
             return self.root_page_id != old_root_id
 
         except Exception as e:
@@ -493,9 +492,10 @@ class BPlusTree:
             # 锁耦合的核心：检查子节点是否“安全”。
             # 对插入操作而言，"安全"意味着子节点未满。
             next_page_wrapper = BPlusTreePage(next_page_obj)
-            is_child_safe = not (not next_page_wrapper.is_leaf and InternalPage(next_page_obj).is_full())
+            child_is_safe = (next_page_wrapper.is_leaf and not LeafPage(next_page_obj).is_full()) or \
+                            (not next_page_wrapper.is_leaf and not InternalPage(next_page_obj).is_full())
 
-            if is_child_safe:
+            if child_is_safe:
                 # 如果子节点是安全的，则释放所有祖先节点的锁。
                 context.release_ancestors_latches()
 
@@ -778,13 +778,17 @@ class BPlusTree:
 
     def _adjust_root(self, root_node: BPlusTreePage):
         """
-        调整根节点。如果根在删除后变为空，树的高度可能会降低。
+        【代码修改】调整根节点。如果根在删除后变为空，树的高度可能会降低。
+        修复了当根节点是叶子节点且键数 > 0 时被错误清空的bug。
         """
+        # Case A: 根是内部节点，且已无键（只剩一个指针），此时树高降低
         if not root_node.is_leaf and root_node.get_num_keys() == 0:
+            # 唯一的子节点成为新的根
             new_root_id = root_node.pointers[0]
             self.root_page_id = new_root_id
-        elif root_node.is_leaf and root_node.get_num_keys() == 0:
-            # [FIX] 使用 INVALID_PAGE_ID 标记空树
-            self.root_page_id = INVALID_PAGE_ID
+            return
 
+        # Case B: 根是叶子节点，且已无键，此时整棵树变为空
+        if root_node.is_leaf and root_node.get_num_keys() == 0:
+            self.root_page_id = INVALID_PAGE_ID
 
