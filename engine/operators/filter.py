@@ -11,7 +11,7 @@ from engine.b_plus_tree import BPlusTree
 class FilterOperator(Operator):
     """过滤算子的具体实现"""
 
-    def __init__(self, condition: Expression, child: LogicalPlan, storage_engine: StorageEngine, executor: Any,
+    def __init__(self, condition: Expression, child: Operator, storage_engine: StorageEngine, executor: Any,
                  bplus_tree: Optional[BPlusTree] = None):
         self.condition = condition
         self.child = child
@@ -43,7 +43,7 @@ class FilterOperator(Operator):
             return results
 
         # --- 路径 B: 全表扫描 + 过滤 ---
-        rows = self.executor.execute(self.child)
+        rows = self.executor.execute([self.child])
         results = []
         for rid, row in rows:
             if self._evaluate_condition(self.condition, row):

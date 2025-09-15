@@ -6,14 +6,16 @@ from sql.ast import *
 from engine.storage_engine import StorageEngine
 # [FIX] 引入新的异常类型
 from engine.exceptions import PrimaryKeyViolationError
+from typing import List, Any, Dict, Optional
 
 class InsertOperator:
     """INSERT 操作的执行算子"""
 
-    def __init__(self, table_name: str, values: List[object], storage_engine: StorageEngine):
+    def __init__(self, table_name: str, values: List[object], storage_engine: StorageEngine, txn_id: Optional[int] = None):
         self.table_name = table_name
         self.values = values
         self.storage_engine = storage_engine
+        self.txn_id = txn_id
 
     def execute(self) -> List[Any]:
         """
@@ -28,7 +30,7 @@ class InsertOperator:
 
         # [FIX] 使用 try...except 块来捕获并处理来自存储引擎的特定错误
         try:
-            self.storage_engine.insert_row(self.table_name, row_data_bytes)
+            self.storage_engine.insert_row(self.table_name, row_data_bytes,self.txn_id)
         except PrimaryKeyViolationError as e:
             # 将底层的存储错误转换为对用户更友好的运行时错误
             raise RuntimeError(f"插入失败：{e}")

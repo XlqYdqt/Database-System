@@ -15,19 +15,21 @@ class UpdateOperator(Operator):
     """UPDATE 操作的执行算子"""
 
     def __init__(self, table_name: str, child: Operator, updates: List[Tuple[str, Expression]],
-                 storage_engine: StorageEngine, executor: Any, bplus_tree: Optional[Any] = None):
+                 storage_engine: StorageEngine, executor: Any, bplus_tree: Optional[Any] = None,
+                 txn_id: Optional[int] = None):
         self.table_name = table_name
         self.child = child
         self.updates = updates
         self.storage_engine = storage_engine
         self.executor = executor
         self.bplus_tree = bplus_tree
+        self.txn_id = txn_id
 
     def execute(self) -> List[Any]:
         """
-        [INDEX-SEEK FIX] 修复了 UPDATE 未使用索引的问题。
-        现在会优先检查是否能使用 B+ 树索引进行点查询，
-        如果不行，再回退到全表扫描。
+        支持事务的 UPDATE：
+        - 非事务模式 (txn_id is None)：立即更新数据和索引
+        - 事务模式 (txn_id is not None)：只记录日志，延迟到 COMMIT 时应用
         """
         updated_count = 0
 
@@ -38,6 +40,7 @@ class UpdateOperator(Operator):
 
         rows_to_update: List[Tuple[Tuple[int, int], Dict[str, Any]]] = []
 
+        # ============= 1. 优先用索引，否则全表扫描 =============
         if self.bplus_tree and self._can_use_index():
             pk_value = self._extract_pk_value()
             if pk_value is not None:
@@ -51,52 +54,69 @@ class UpdateOperator(Operator):
                         row_data_dict = self._deserialize_row_data(row_data_bytes, schema)
                         rows_to_update.append((rid, row_data_dict))
         else:
-            rows_to_update = self.executor.execute(self.child)
+            rows_to_update = self.executor.execute([self.child])
 
+        # ============= 2. 逐行更新 =============
         for original_rid, original_row_dict in rows_to_update:
             try:
+                # 构造新行
                 new_row_dict = dict(original_row_dict)
                 for col_name, expr in self.updates:
                     new_row_dict[col_name] = self._eval_expr(expr, original_row_dict)
 
+                # 主键相关
                 pk_col_def, _ = self.storage_engine._get_pk_info(schema)
                 pk_col_name = pk_col_def.name
                 old_pk_value = original_row_dict[pk_col_name]
                 new_pk_value = new_row_dict[pk_col_name]
                 pk_changed = (old_pk_value != new_pk_value)
 
-                if pk_changed and self.bplus_tree:
-                    new_pk_bytes = self.storage_engine._prepare_key_for_b_tree(new_pk_value, pk_col_def.data_type)
-                    if self.bplus_tree.search(new_pk_bytes) is not None:
-                        raise PrimaryKeyViolationError(new_pk_value)
-
+                # 序列化新数据
                 new_row_data_bytes = self._serialize_row_data(new_row_dict, schema)
-                new_rid = self.storage_engine.update_row_by_rid(self.table_name, original_rid, new_row_data_bytes)
-                if new_rid is None:
-                    print(f"警告: 更新 RID {original_rid} 失败，已跳过。")
-                    continue
 
-                row_moved = (original_rid != new_rid)
+                # 🚩 分事务模式 & 非事务模式处理
+                if self.txn_id is not None:
+                    # 事务模式：只写入日志，不实际更新
+                    old_row_data_bytes = self._serialize_row_data(original_row_dict, schema)
+                    self.storage_engine.txn_manager.add_write_set(
+                        self.txn_id,
+                        self.table_name,
+                        original_rid,
+                        old_data=old_row_data_bytes,
+                        new_data=new_row_data_bytes,
+                    )
+                else:
+                    # 非事务模式：立即更新数据
+                    new_rid = self.storage_engine.update_row_by_rid(
+                        self.table_name, original_rid, new_row_data_bytes
+                    )
+                    if new_rid is None:
+                        print(f"警告: 更新 RID {original_rid} 失败，已跳过。")
+                        continue
 
-                if self.bplus_tree and (pk_changed or row_moved):
-                    old_pk_bytes = self.storage_engine._prepare_key_for_b_tree(old_pk_value, pk_col_def.data_type)
-                    new_pk_bytes = self.storage_engine._prepare_key_for_b_tree(new_pk_value, pk_col_def.data_type)
+                    row_moved = (original_rid != new_rid)
 
-                    try:
-                        self.bplus_tree.delete(old_pk_bytes)
-                        insert_result = self.bplus_tree.insert(new_pk_bytes, new_rid)
+                    # 处理 B+ 树索引
+                    if self.bplus_tree and (pk_changed or row_moved):
+                        old_pk_bytes = self.storage_engine._prepare_key_for_b_tree(old_pk_value, pk_col_def.data_type)
+                        new_pk_bytes = self.storage_engine._prepare_key_for_b_tree(new_pk_value, pk_col_def.data_type)
 
-                        if insert_result is None:
-                            raise PrimaryKeyViolationError(new_pk_value)
+                        try:
+                            self.bplus_tree.delete(old_pk_bytes)
+                            insert_result = self.bplus_tree.insert(new_pk_bytes, new_rid)
 
-                        if insert_result:  # root_changed
-                            self.storage_engine.update_index_root(self.table_name, self.bplus_tree.root_page_id)
+                            if insert_result is None:
+                                raise PrimaryKeyViolationError(new_pk_value)
 
-                    except Exception as e:
-                        self.bplus_tree.insert(old_pk_bytes, original_rid)
-                        original_row_data_bytes = self._serialize_row_data(original_row_dict, schema)
-                        self.storage_engine.update_row_by_rid(self.table_name, new_rid, original_row_data_bytes)
-                        raise e
+                            if insert_result:  # root_changed
+                                self.storage_engine.update_index_root(self.table_name, self.bplus_tree.root_page_id)
+
+                        except Exception as e:
+                            # 回滚索引和行
+                            self.bplus_tree.insert(old_pk_bytes, original_rid)
+                            original_row_data_bytes = self._serialize_row_data(original_row_dict, schema)
+                            self.storage_engine.update_row_by_rid(self.table_name, new_rid, original_row_data_bytes)
+                            raise e
 
                 updated_count += 1
             except Exception as e:

@@ -1,3 +1,4 @@
+import struct
 from typing import Any, List, Tuple, Dict, Optional
 
 from engine.storage_engine import StorageEngine
@@ -11,12 +12,13 @@ class DeleteOperator(Operator):
     """DELETE 操作的执行算子"""
 
     def __init__(self, table_name: str, child: Operator, storage_engine: StorageEngine, executor: Any,
-                 bplus_tree: Optional[Any] = None):
+                 bplus_tree: Optional[Any] = None, txn_id: Optional[int] = None):
         self.table_name = table_name
         self.child = child
         self.storage_engine = storage_engine
         self.executor = executor
         self.bplus_tree = bplus_tree
+        self.txn_id = txn_id
 
     def execute(self) -> List[Any]:
         """
@@ -48,7 +50,7 @@ class DeleteOperator(Operator):
                         rows_to_delete.append((rid, row_data_dict))
         else:
             # --- 回退路径：全表扫描 ---
-            rows_to_delete = self.executor.execute(self.child)
+            rows_to_delete = self.executor.execute([self.child])
 
         # 后续的删除逻辑
         for rid, row_data_dict in rows_to_delete:
@@ -58,18 +60,30 @@ class DeleteOperator(Operator):
             index_deleted = False
 
             try:
+                if self.txn_id is not None:
+                    # 🚩 事务模式：只写日志，不立即修改索引和数据
+                    old_row_data_bytes = self._serialize_row_data(row_data_dict, schema)
+                    self.storage_engine.txn_manager.add_write_set(
+                        self.txn_id,
+                        self.table_name,
+                        rid,
+                        old_data=old_row_data_bytes,
+                        new_data=None
+                    )
+                else:
+                # 🚩 非事务模式：立即删除索引 + 数据
                 # 1. 先删除索引
-                if self.bplus_tree:
-                    root_changed = self.bplus_tree.delete(pk_bytes_to_delete)
-                    index_deleted = True
-                    if root_changed:
-                        self.storage_engine.update_index_root(self.table_name, self.bplus_tree.root_page_id)
+                    if self.bplus_tree:
+                        root_changed = self.bplus_tree.delete(pk_bytes_to_delete)
+                        index_deleted = True
+                        if root_changed:
+                            self.storage_engine.update_index_root(self.table_name, self.bplus_tree.root_page_id)
 
                 # 2. 再删除数据行
-                success = self.storage_engine.delete_row_by_rid(self.table_name, rid)
+                    success = self.storage_engine.delete_row_by_rid(self.table_name, rid, self.txn_id)
 
-                if success:
-                    deleted_count += 1
+                    if success:
+                        deleted_count += 1
             except Exception as e:
                 # 【ATOMICITY FIX】如果第2步（删除数据）失败，但第1步（删除索引）已成功
                 # 那么我们需要回滚第1步的操作，以保证数据一致性。
@@ -104,6 +118,24 @@ class DeleteOperator(Operator):
         if self._can_use_index():
             return self.child.condition.right.value
         return None
+
+    def _serialize_row_data(self, row_dict: Dict[str, Any], schema: Dict[str, ColumnDefinition]) -> bytes:
+        """将字典形式的行数据序列化为字节流。"""
+        row_data = bytearray()
+        for col_def in schema.values():
+            val = row_dict[col_def.name]
+            if col_def.data_type == DataType.INT:
+                row_data.extend(int(val).to_bytes(4, "little", signed=True))
+            elif col_def.data_type in (DataType.TEXT, DataType.STRING):
+                encoded = str(val).encode("utf-8")
+                row_data.extend(len(encoded).to_bytes(4, "little"))
+                row_data.extend(encoded)
+            # --- [BUG FIX] ---
+            # 添加了对 FLOAT 类型的处理，之前缺失导致数据序列化不完整。
+            elif col_def.data_type == DataType.FLOAT:
+                row_data.extend(struct.pack("<f", float(val)))
+            # --- [END FIX] ---
+        return bytes(row_data)
 
     def _deserialize_row_data(self, row_bytes: bytes, schema: Dict[str, ColumnDefinition]) -> Dict[str, Any]:
         """将字节流反序列化为字典形式的行数据。"""
