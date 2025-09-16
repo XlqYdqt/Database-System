@@ -52,7 +52,7 @@ class SemanticAnalyzer:
         elif isinstance(statement, CreateViewStatement):#尚未完成
             return self.analyze_create_view(statement)
         else:
-            raise SemanticError(f"不支持的语句类型: {type(statement).__name__}")
+            raise SemanticError(f"语义不支持的语句类型: {type(statement).__name__}")
 
     def analyze_create_table(self, statement: CreateTableStatement) -> CreateTableStatement:
         """分析CREATE TABLE语句"""
