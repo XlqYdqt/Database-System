@@ -96,7 +96,6 @@ class DataPage:
 
     def get_all_records(self) -> List[Tuple[int, bytes]]:
         """
-        [BUG FIX] 重写了记录扫描逻辑，使其更加健壮。
         新逻辑可以安全地处理被删除的记录（负长度），
         通过读取长度的绝对值来正确跳到下一条记录，避免错位。
         """

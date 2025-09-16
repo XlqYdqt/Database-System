@@ -3,26 +3,33 @@
 
 from typing import Any, List
 
-from engine.operators import ProjectOperator, FilterOperator, SeqScanOperator, CreateTableOperator
+from engine.operators.create_table import CreateTableOperator
 from engine.operators.insert import InsertOperator
+from engine.operators.project import ProjectOperator
+from engine.operators.filter import FilterOperator
+from engine.operators.seq_scan import SeqScanOperator
 from engine.operators.update import UpdateOperator
 from engine.operators.delete import DeleteOperator
+from engine.operators.create_index import CreateIndexOperator  # <-- 【新增】导入新的 CreateIndexOperator
 
 from engine.storage_engine import StorageEngine
 from sql.ast import Operator
-from sql.planner import CreateTable, Insert, Project, Filter, SeqScan, Update, Delete
+from sql.planner import CreateTable, Insert, Project, Filter, SeqScan, Update, Delete, CreateIndex
 
 
 class ExecutionContext:
     """执行上下文，包含执行过程中需要的状态信息"""
 
     def __init__(self):
-        self.current_table = None  # 当前正在操作的表
-        self.current_row = None  # 当前正在处理的行
+        self.current_table = None
+        self.current_row = None
 
 
 class Executor:
-    """执行器，负责遍历和执行算子树"""
+    """
+    执行器 (重构版)
+    负责遍历和执行算子树，实例化重构后的算子。
+    """
 
     def __init__(self, storage_engine: StorageEngine):
         self.context = ExecutionContext()
@@ -32,6 +39,9 @@ class Executor:
         """执行查询计划，返回结果集"""
         if isinstance(plan, CreateTable):
             return self._execute_create_table(plan)
+        # <-- 【新增】处理 CreateIndex 计划的逻辑块
+        elif isinstance(plan, CreateIndex):
+            return self._execute_create_index(plan)
         elif isinstance(plan, Insert):
             return self._execute_insert(plan)
         elif isinstance(plan, Project):
@@ -49,9 +59,20 @@ class Executor:
 
     def _execute_create_table(self, op: CreateTable) -> List[Any]:
         """执行CREATE TABLE操作"""
-        # CreateTableOperator now handles the storage_engine.create_table call
         create_table_op = CreateTableOperator(op.table_name, op.columns, self.storage_engine)
         create_table_op.execute()
+        return []
+
+    # <-- 【新增】执行 CreateIndex 的具体方法
+    def _execute_create_index(self, op: CreateIndex) -> List[Any]:
+        """执行 CREATE INDEX 操作"""
+        create_index_op = CreateIndexOperator(
+            table_name=op.table_name,
+            column_name=op.column_name,
+            is_unique=op.is_unique,
+            storage_engine=self.storage_engine
+        )
+        create_index_op.execute()
         return []
 
     def _execute_insert(self, op: Insert) -> List[Any]:
@@ -67,10 +88,7 @@ class Executor:
 
     def _execute_filter(self, op: Filter) -> List[Any]:
         """执行过滤操作"""
-        bplus_tree = self.storage_engine.get_bplus_tree(op.table_name)
-        # [FIX] Corrected the argument order for FilterOperator.
-        # The executor (`self`) should be the 4th argument, and storage_engine the 3rd.
-        filter_op = FilterOperator(op.condition, op.child, self.storage_engine, self, bplus_tree)
+        filter_op = FilterOperator(op.condition, op.child, self.storage_engine, self)
         return filter_op.execute()
 
     def _execute_seq_scan(self, op: SeqScan) -> List[Any]:
@@ -80,18 +98,12 @@ class Executor:
 
     def _execute_update(self, op: Update) -> List[Any]:
         """执行UPDATE操作"""
-        # assignments 是 dict，转成 [(col, expr), ...]
         updates = list(op.assignments.items())
-
-        # 获取B+树索引
-        bplus_tree = self.storage_engine.get_bplus_tree(op.table_name)
-        update_op = UpdateOperator(op.table_name, op.child, updates, self.storage_engine, self, bplus_tree)
+        update_op = UpdateOperator(op.table_name, op.child, updates, self.storage_engine, self)
         return update_op.execute()
 
     def _execute_delete(self, op: Delete) -> List[Any]:
         """执行DELETE操作"""
-
-        # 获取B+树索引
-        bplus_tree = self.storage_engine.get_bplus_tree(op.table_name)
-        delete_op = DeleteOperator(op.table_name, op.child, self.storage_engine, self, bplus_tree)
+        delete_op = DeleteOperator(op.table_name, op.child, self.storage_engine, self)
         return delete_op.execute()
+
