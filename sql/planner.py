@@ -27,9 +27,12 @@ class Filter(LogicalPlan):
     def __init__(self, condition: Expression, child: LogicalPlan):
         self.condition = condition
         self.child = child
+        # 自动继承 child 的 table_name，兼容旧代码
+        self.table_name = getattr(child, "table_name", None)
 
     def __repr__(self):
         return f"Filter(condition={self.condition}) -> {self.child}"
+
 
 
 class Project(LogicalPlan):
@@ -273,6 +276,33 @@ class Planner:
         else:
             raise ValueError("SELECT 语句缺少 FROM 子句或表名信息")
 
+
+
+    def _op_str(self, op) -> str:
+        """
+        将 op 规范化为大写字符串。
+        支持的输入：
+         - Operator 对象（有 .op 或 .value）
+         - 直接的字符串（'IN', 'AND', '>' 等）
+         - 其它可被 str() 转换的对象
+        返回大写字符串；如果 op 为 None 返回空字符串。
+        """
+        if op is None:
+            return ''
+        # 常见 AST 中可能为 Operator 对象，尝试读取常见属性
+        if hasattr(op, 'op'):
+            try:
+                return str(op.op).upper()
+            except Exception:
+                return str(op).upper()
+        if hasattr(op, 'value'):
+            try:
+                return str(op.value).upper()
+            except Exception:
+                return str(op).upper()
+        # 最后兜底：直接字符串化并 upper
+        return str(op).upper()
+
     def _bind_in_subqueries(self, expr: Expression) -> Expression:
         """
         如果表达式是 IN 且右侧是子查询（SelectStatement），把右侧替换为 InSubquery 包含子计划。
@@ -284,7 +314,7 @@ class Planner:
             return None
 
         # 1) 检查二元表达式类型（有 left/op/right）
-        if hasattr(expr, 'op') and getattr(expr, 'op', None) and expr.op.upper() == 'IN':
+        if hasattr(expr, 'op') and getattr(expr, 'op', None) and self._op_str(expr.op) == 'IN':
             right = expr.right
             left = expr.left
             # 如果右侧是 SelectStatement（子查询），为其生成子计划
