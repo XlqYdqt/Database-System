@@ -4,6 +4,13 @@ from .lru_replacer import LRUReplacer
 
 # 导入 threading 模块，为并发环境下的锁机制提供支持
 import threading
+# 导入 logging 模块，用于记录日志
+import logging
+
+# --- 日志配置 ---
+# 配置日志记录器，设置级别为 INFO，并定义输出格式。
+# 这将使得日志信息包含时间戳、级别和消息内容。
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
 
 # --- 页面对象 ---
@@ -61,6 +68,11 @@ class BufferPoolManager:
         # 在并发环境中，需要一个锁（或称为 latch）来保护缓冲池的内部数据结构。
         self.latch = threading.Lock()
 
+        # --- 新增：性能统计属性 ---
+        self.num_requests = 0
+        self.num_hits = 0
+        self.num_replacements = 0
+
 
     def __enter__(self):
         """进入 with 语句时调用。"""
@@ -94,8 +106,11 @@ class BufferPoolManager:
         此方法是线程安全的。
         """
         with self.latch:
+            self.num_requests += 1  # 记录一次请求
+
             # 1. 首先检查页是否已在缓冲池中（缓存命中）。
             if page_id in self.page_table:
+                self.num_hits += 1  # 记录一次命中
                 frame_id = self.page_table[page_id]
                 page = self.pages[frame_id]
                 page.pin_count += 1
@@ -105,12 +120,16 @@ class BufferPoolManager:
             # 2. 如果不在缓冲池中（缓存未命中），寻找一个可用的帧。
             frame_id = self._find_free_frame()
             if frame_id is None:
+                logging.warning("Buffer pool is full, all pages are pinned. Cannot fetch new page.")
                 return None  # 所有帧都被钉住，无法获取新页。
 
-            # 3. 如果找到的帧之前被占用，处理旧的页。
+            # 3. 如果找到的帧之前被占用，处理旧的页（页面替换）。
             old_page = self.pages[frame_id]
             if old_page.page_id is not None:
+                self.num_replacements += 1  # 记录一次替换
+                logging.info(f"Page Replacement: Evicting page {old_page.page_id} from frame {frame_id} to make space for page {page_id}.")
                 if old_page.is_dirty:
+                    logging.info(f"Writing dirty page {old_page.page_id} to disk before eviction.")
                     self.disk_manager.write_page(old_page.page_id, old_page.data)
                 del self.page_table[old_page.page_id]
 
@@ -168,12 +187,16 @@ class BufferPoolManager:
             # 1. 寻找一个可用的帧。
             frame_id = self._find_free_frame()
             if frame_id is None:
+                logging.warning("Buffer pool is full, all pages are pinned. Cannot create new page.")
                 return None
 
-            # 2. 如果找到的帧之前被占用，处理旧的页。
+            # 2. 如果找到的帧之前被占用，处理旧的页（页面替换）。
             old_page = self.pages[frame_id]
             if old_page.page_id is not None:
+                self.num_replacements += 1 # 记录一次替换
+                logging.info(f"Page Replacement: Evicting page {old_page.page_id} from frame {frame_id} for a new page.")
                 if old_page.is_dirty:
+                    logging.info(f"Writing dirty page {old_page.page_id} to disk before eviction.")
                     self.disk_manager.write_page(old_page.page_id, old_page.data)
                 del self.page_table[old_page.page_id]
 
@@ -270,3 +293,32 @@ class BufferPoolManager:
                     page.is_dirty = False
             return True
 
+    # --- 新增：统计信息方法 ---
+    def get_stats(self) -> dict:
+        """
+        获取缓冲池的性能统计信息。
+
+        Returns:
+            dict: 包含请求数、命中数、替换数和命中率的字典。
+        """
+        with self.latch:
+            hit_rate = (self.num_hits / self.num_requests * 100) if self.num_requests > 0 else 0
+            stats = {
+                "requests": self.num_requests,
+                "hits": self.num_hits,
+                "replacements": self.num_replacements,
+                "hit_rate_percent": f"{hit_rate:.2f}%"
+            }
+            return stats
+
+    def print_stats(self):
+        """
+        将缓冲池的性能统计信息打印到日志。
+        """
+        stats = self.get_stats()
+        logging.info("--- Buffer Pool Stats ---")
+        logging.info(f"Total Requests:   {stats['requests']}")
+        logging.info(f"Cache Hits:       {stats['hits']}")
+        logging.info(f"Page Replacements:{stats['replacements']}")
+        logging.info(f"Hit Rate:         {stats['hit_rate_percent']}")
+        logging.info("-------------------------")
