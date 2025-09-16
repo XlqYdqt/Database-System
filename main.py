@@ -93,6 +93,8 @@ def main():
     finally:
         # 【关键】确保在程序退出时，将缓冲池中的所有脏页刷回磁盘
         print("\nShutting down. Flushing all pages to disk...")
+        buffer_pool_manager.print_stats()
+        print("Flushing all pages to disk...")
         buffer_pool_manager.flush_all_pages()
         disk_manager.close()
         print("Shutdown complete.")
