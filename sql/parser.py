@@ -384,21 +384,34 @@ class Parser:
         return columns
 
     def parse_order_by(self) -> List[OrderByClause]:
-        """解析 ORDER BY 子句 (Parses the ORDER BY clause)"""
+        """解析 ORDER BY 子句"""
         order_by_columns = []
 
-        while self.current_token and self.current_token.type != TokenType.KEYWORD and self.current_token.value != ';':
+        # 确保当前有 token 且不是语句结束
+        while (self.current_token and
+               self.current_token.type != TokenType.EOF and
+               self.current_token.value not in (';', 'LIMIT', 'WHERE', 'GROUP', 'HAVING')):
+
+            # 解析列引用
             column = self.parse_column_reference()
+
+            # 解析排序方向
             direction = 'ASC'
-            if (self.current_token and self.current_token.type == TokenType.KEYWORD and
+            if (self.current_token and
+                    self.current_token.type == TokenType.KEYWORD and
                     self.current_token.value in ('ASC', 'DESC')):
                 direction = self.current_token.value
                 self._advance()
 
             order_by_columns.append(OrderByClause(column, direction))
 
-            if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ',':
+            # 检查是否有更多列
+            if (self.current_token and
+                    self.current_token.type == TokenType.PUNCTUATION and
+                    self.current_token.value == ','):
                 self._advance()
+            else:
+                break  # 没有逗号，结束 ORDER BY 子句
 
         return order_by_columns
 
