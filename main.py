@@ -46,22 +46,33 @@ def main():
 
                     try:
                         # 1. 词法分析
+                        # print(f"SQL: {sql}")
+
                         lexer = Lexer(sql)
                         tokens = lexer.tokenize()
+
+                        # print("词法分析器token")
+                        # # 打印所有token
+                        # for token in tokens:
+                        #     print(f"   {token}")
 
                         # 2. 语法分析
                         parser = Parser(tokens)
                         ast = parser.parse()
-
+                        # print(f"   语法分析生成AST: {ast}")
                         # 3. 语义分析
-                        # 注意：SemanticAnalyzer 应该直接使用实时的 catalog_page，而不是它的拷贝
+
                         semantic_analyzer = SemanticAnalyzer(storage_engine.catalog_page)
                         analyzed_ast = semantic_analyzer.analyze(ast)
+
+                        # print(f"   语义分析结果: {analyzed_ast}")
 
                         # 4. 逻辑计划生成
                         planner = Planner()
                         logical_plan = planner.plan(analyzed_ast)
 
+                        # print(f"   逻辑计划: {logical_plan}")
+                        
                         # 5. 执行计划
                         # 确保 logical_plan 始终是一个列表
                         if not isinstance(logical_plan, list):
