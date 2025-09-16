@@ -26,6 +26,14 @@ class Parser:
                     return self.parse_create_view()
                 elif self.next_token_is(TokenType.KEYWORD, 'ROLE'):
                     return self.parse_create_role()
+            elif self.current_token.value == 'DROP':
+                # 不要消耗 DROP token，让具体的解析方法处理
+                if self.next_token_is(TokenType.KEYWORD, 'INDEX'):
+                    return self.parse_drop_index()
+                elif self.next_token_is(TokenType.KEYWORD, 'TABLE'):
+                    return self.parse_drop_table()
+                elif self.next_token_is(TokenType.KEYWORD, 'VIEW'):
+                    return self.parse_drop_view()
             elif self.current_token.value == 'INSERT':
                 return self.parse_insert()
             elif self.current_token.value == 'SELECT':
@@ -458,40 +466,62 @@ class Parser:
         """解析比较表达式"""
         left = self.parse_additive_expression()
 
+        # 添加调试信息
+        if self.current_token:
+            print(f"[DEBUG] 当前token: {self.current_token.value} (类型: {self.current_token.type})")
+
+        # 检查是否是运算符或关键字（包括 IN）
         if (self.current_token and
-                self.current_token.type == TokenType.OPERATOR and
-                self.current_token.value in ('=', '!=', '<', '<=', '>', '>=',
-                                             'LIKE', 'ILIKE', 'IN', 'IS', 'IS NOT', 'BETWEEN')):
+                (self.current_token.type == TokenType.OPERATOR or
+                 (self.current_token.type == TokenType.KEYWORD and
+                  self.current_token.value.upper() in ('LIKE', 'ILIKE', 'IN', 'IS', 'IS NOT', 'BETWEEN')))):
+
             # 使用 Operator 类初始化
-            op = Operator(self.current_token.value)
+            op = Operator(self.current_token.value.upper())
+            print(f"[DEBUG] 识别到运算符: {op.value}")
             self._advance()
 
             # 处理特殊操作符
             if op.value == 'BETWEEN':
                 # BETWEEN x AND y
                 lower = self.parse_additive_expression()
-                self._expect(TokenType.KEYWORD, 'AND')
+                self._expect_keyword('AND')
                 upper = self.parse_additive_expression()
                 return BetweenExpression(left, lower, upper)
+
             elif op.value == 'IN':
+                print(f"[DEBUG] 开始解析IN表达式")
                 # IN (value1, value2, ...) 或 IN (subquery)
-                if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == '(':
-                    self._advance()
-                    # 检查是否是子查询
-                    if self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'SELECT':
-                        subquery = self.parse_select()
-                        self._expect(TokenType.PUNCTUATION, ')')
-                        return InExpression(left, subquery)
-                    else:
-                        # 值列表
-                        values = self.parse_value_list()
-                        self._expect(TokenType.PUNCTUATION, ')')
-                        return InExpression(left, values)
+                self._expect(TokenType.PUNCTUATION, '(')
+                print(f"[DEBUG] 消耗左括号后，当前token: {self.current_token.value if self.current_token else 'EOF'}")
+
+                # 检查是否是子查询
+                if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value.upper() == 'SELECT':
+                    print(f"[DEBUG] 识别到子查询")
+                    subquery = self.parse_select()
+                    self._expect(TokenType.PUNCTUATION, ')')
+                    return InExpression(left, subquery)
+                else:
+                    print(f"[DEBUG] 识别到值列表")
+                    # 值列表
+                    values = self.parse_value_list()
+                    self._expect(TokenType.PUNCTUATION, ')')
+                    return InExpression(left, values)
+
             else:
+                # 处理其他运算符
                 right = self.parse_additive_expression()
                 return BinaryExpression(left, op, right)
 
         return left
+    def _expect_keyword(self, keyword: str) -> Token:
+        """期望下一个Token是指定的关键字"""
+        if not self.current_token or self.current_token.type != TokenType.KEYWORD or self.current_token.value.upper() != keyword.upper():
+            raise SyntaxError(f"期望关键字 '{keyword}'")
+        token = self.current_token
+        self._advance()
+        return token
+
 
     def parse_additive_expression(self) -> Expression:
         """解析加减表达式"""
@@ -714,6 +744,53 @@ class Parser:
             unique=unique
         )
 
+    def parse_drop_index(self) -> DropIndexStatement:
+        """解析DROP INDEX语句"""
+        self._expect(TokenType.KEYWORD, 'DROP')
+
+        # 处理 CONCURRENTLY 选项
+        concurrently = False
+        if (self.current_token and self.current_token.type == TokenType.KEYWORD and
+                self.current_token.value == 'CONCURRENTLY'):
+            concurrently = True
+            self._advance()
+
+        self._expect(TokenType.KEYWORD, 'INDEX')
+
+        # 处理 IF EXISTS 选项
+        if_exists = False
+        if (self.current_token and self.current_token.type == TokenType.KEYWORD and
+                self.current_token.value == 'IF'):
+            self._advance()
+            self._expect(TokenType.KEYWORD, 'EXISTS')
+            if_exists = True
+
+        # 解析索引名称
+        index_name = self._expect(TokenType.IDENTIFIER).value
+
+        # 处理 CASCADE 或 RESTRICT 选项
+        cascade = False
+        restrict = False
+        if self.current_token and self.current_token.type == TokenType.KEYWORD:
+            if self.current_token.value == 'CASCADE':
+                cascade = True
+                self._advance()
+            elif self.current_token.value == 'RESTRICT':
+                restrict = True
+                self._advance()
+
+        # 处理分号（如果有）
+        if self.current_token and self.current_token.type == TokenType.PUNCTUATION and self.current_token.value == ';':
+            self._advance()
+
+        # 创建并返回 DropIndexStatement 对象
+        return DropIndexStatement(
+            index_name=index_name,
+            if_exists=if_exists,
+            concurrently=concurrently,
+            cascade=cascade,
+            restrict=restrict
+        )
     def parse_transaction(self) -> TransactionStatement:
         """解析事务控制语句"""
         command_str = self._expect(TokenType.KEYWORD).value

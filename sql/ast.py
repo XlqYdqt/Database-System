@@ -467,20 +467,28 @@ class CreateIndexStatement(Statement):
 class DropIndexStatement(Statement):
     """DROP INDEX语句"""
 
-    def __init__(self, index_name: str, if_exists: bool = False, concurrently: bool = False):
+    def __init__(self, index_name: str, if_exists: bool = False,
+                 concurrently: bool = False, cascade: bool = False,
+                 restrict: bool = False):
         """
         :param index_name: 要删除索引的名称
         :param if_exists: 如果索引不存在，是否忽略错误
         :param concurrently: 并发删除索引的标志
+        :param cascade: 级联删除依赖对象
+        :param restrict: 如果有依赖对象则拒绝删除
         """
         self.index_name = index_name
         self.if_exists = if_exists
         self.concurrently = concurrently
+        self.cascade = cascade
+        self.restrict = restrict
 
     def __repr__(self):
         exists_str = " IF EXISTS" if self.if_exists else ""
         concurrent_str = " CONCURRENTLY" if self.concurrently else ""
-        return f"DropIndexStatement(index={self.index_name}{exists_str}{concurrent_str})"
+        cascade_str = " CASCADE" if self.cascade else ""
+        restrict_str = " RESTRICT" if self.restrict else ""
+        return f"DropIndexStatement(index={self.index_name}{exists_str}{concurrent_str}{cascade_str}{restrict_str})"
 
 
 class Join:
