@@ -2,6 +2,7 @@ from typing import List, Optional, Any
 
 from engine.operators.create_table import CreateTableOperator
 from engine.operators.insert import InsertOperator
+from engine.operators.join import JoinOperator
 from engine.operators.project import ProjectOperator
 from engine.operators.filter import FilterOperator
 from engine.operators.seq_scan import SeqScanOperator
@@ -9,14 +10,19 @@ from engine.operators.update import UpdateOperator
 from engine.operators.delete import DeleteOperator
 from engine.operators.create_index import CreateIndexOperator
 
+
 from engine.storage_engine import StorageEngine
-from sql.planner import CreateTable, Insert, Project, Filter, SeqScan, Update, Delete, CreateIndex, Begin, Commit, Rollback
+from sql.planner import (
+    CreateTable, Insert, Project, Filter, SeqScan,
+    Update, Delete, CreateIndex, Begin, Commit, Rollback,
+    Join   # ✅ 引入 Join
+)
 
 
 class Executor:
     """
     执行器 (重构版)
-    负责遍历和执行算子树，实例化重构后的算子。
+    遍历逻辑计划树，实例化对应算子。
     """
 
     def __init__(self, storage_engine: StorageEngine):
@@ -28,7 +34,6 @@ class Executor:
         """执行一个或多个查询计划，返回结果集"""
         all_results = []
         for plan in plans:
-            # 获取当前操作的事务ID
             txn_id = self.current_txn_id
             result = None
 
@@ -48,6 +53,8 @@ class Executor:
                 result = self._execute_filter(plan)
             elif isinstance(plan, Project):
                 result = self._execute_project(plan)
+            elif isinstance(plan, Join):   # ✅ 新增
+                result = self._execute_join(plan)
             elif isinstance(plan, Begin):
                 result = self._execute_begin_transaction()
             elif isinstance(plan, Commit):
@@ -58,7 +65,6 @@ class Executor:
                 raise ValueError(f"不支持的计划类型: {type(plan)}")
 
             if result is not None:
-                # SELECT 等查询会返回多行结果，需要用 extend
                 if isinstance(result, list):
                     all_results.extend(result)
                 else:
@@ -66,6 +72,19 @@ class Executor:
 
         return all_results
 
+    # --- 新增 JOIN 执行 ---
+    def _execute_join(self, op: Join) -> List[Any]:
+        join_op = JoinOperator(
+            join_type=op.join_type,
+            condition=op.condition,
+            left_child=op.left,
+            right_child=op.right,
+            storage_engine=self.storage_engine,
+            executor=self
+        )
+        return join_op.execute()
+
+    # --- 其他保持不变 ---
     def _execute_create_table(self, op: CreateTable) -> List[Any]:
         op = CreateTableOperator(op.table_name, op.columns, self.storage_engine)
         op.execute()
@@ -82,7 +101,6 @@ class Executor:
         return []
 
     def _execute_insert(self, op: Insert, txn_id: Optional[int]) -> List[Any]:
-        # 注意：INSERT VALUES 格式解析出的 op.values 是一个包含单行值的列表
         for row_values in op.values:
             insert_op = InsertOperator(op.table_name, row_values, self.storage_engine, txn_id)
             insert_op.execute()

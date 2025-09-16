@@ -132,14 +132,13 @@ class SemanticAnalyzer:
     def analyze_select(self, statement: SelectStatement,
                        outer_tables: Optional[Dict[str, List[ColumnDefinition]]] = None) -> SelectStatement:
         """分析SELECT语句，支持外部查询表引用"""
+
         # 如果指定了表名，检查表是否存在（使用CatalogPage）
         if statement.table_name and statement.table_name not in self.catalog.tables:
-            # 检查是否是外部查询的表
             if not outer_tables or statement.table_name not in outer_tables:
                 raise SemanticError(f"表 '{statement.table_name}' 不存在")
             table_columns = outer_tables[statement.table_name]
         else:
-            # 从CatalogPage获取表结构
             table_metadata = self.catalog.get_table_metadata(statement.table_name) if statement.table_name else None
             table_columns = list(table_metadata['schema'].values()) if table_metadata else []
 
@@ -154,7 +153,7 @@ class SemanticAnalyzer:
         for column_expr in statement.columns:
             self._check_column_expression(column_expr, statement.table_name, table_columns, all_tables)
 
-        # 检查WHERE条件中的表达式
+        # 检查 WHERE 条件中的表达式
         if statement.where:
             self._check_expression(statement.where, statement.table_name, table_columns, all_tables)
 
@@ -174,27 +173,28 @@ class SemanticAnalyzer:
         if statement.having:
             self._check_expression(statement.having, statement.table_name, table_columns, all_tables)
 
-        # 对于每个JOIN子句，递归分析
+        # ✅ 对于每个 JOIN 子句，检查表和条件，并加入 all_tables
         for join_clause in statement.joins:
             if isinstance(join_clause.table, SelectStatement):
-                # 递归分析子查询，传递当前的表信息
                 self.analyze_select(join_clause.table, all_tables)
             else:
-                # 检查JOIN的表是否存在
                 if join_clause.table not in self.catalog.tables:
                     raise SemanticError(f"JOIN表 '{join_clause.table}' 不存在")
 
-                # 检查JOIN条件
+                join_table_metadata = self.catalog.get_table_metadata(join_clause.table)
+                join_table_columns = list(join_table_metadata['schema'].values())
+                all_tables[join_clause.table] = join_table_columns  # ✅ 加入 JOIN 表
+
                 if join_clause.condition:
-                    join_table_metadata = self.catalog.get_table_metadata(join_clause.table)
-                    join_table_columns = list(join_table_metadata['schema'].values())
-                    # 合并所有表信息
-                    join_tables = all_tables.copy()
-                    join_tables[join_clause.table] = join_table_columns
-                    self._check_expression(join_clause.condition, statement.table_name,
-                                           table_columns + join_table_columns, join_tables)
+                    self._check_expression(
+                        join_clause.condition,
+                        statement.table_name,
+                        table_columns + join_table_columns,
+                        all_tables
+                    )
 
         return statement
+
     def analyze_update(self, statement: UpdateStatement) -> UpdateStatement:
         """分析UPDATE语句"""
         table_name = statement.table_name
