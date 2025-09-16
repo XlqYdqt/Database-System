@@ -11,10 +11,11 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from sql.lexer import Lexer, TokenType
+from sql.lexer import Lexer
 from sql.parser import Parser
 from sql.semantic import SemanticAnalyzer
 from sql.planner import Planner
+from engine.catalog_page import CatalogPage  # 确保导入 CatalogPage
 
 
 def test_lexer():
@@ -89,7 +90,9 @@ def test_semantic():
     print("测试语义分析器")
     print("=" * 50)
 
-    analyzer = SemanticAnalyzer()
+    # 初始化CatalogPage和SemanticAnalyzer
+    catalog = CatalogPage()
+    analyzer = SemanticAnalyzer(catalog)
 
     # 测试SQL语句
     sql_statements = [
@@ -122,7 +125,9 @@ def test_planner():
     print("测试逻辑计划生成器")
     print("=" * 50)
 
-    analyzer = SemanticAnalyzer()
+    # 初始化CatalogPage和分析器、计划器
+    catalog = CatalogPage()
+    analyzer = SemanticAnalyzer(catalog)
     planner = Planner()
 
     sql_statements = [
@@ -163,7 +168,9 @@ def test_error_cases():
         "DELETE FROM nonexistent WHERE id = 1;"  # 表不存在
     ]
 
-    analyzer = SemanticAnalyzer()
+    # 初始化CatalogPage和SemanticAnalyzer
+    catalog = CatalogPage()
+    analyzer = SemanticAnalyzer(catalog)
 
     # 先创建一个表，以便测试其他错误
     create_sql = "CREATE TABLE users (id INT PRIMARY KEY, name STRING, age INT);"
@@ -215,8 +222,9 @@ def test_sql_expansions():
         "SELECT u.name, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS order_count FROM users u;"
     ]
 
-    # 创建分析器和计划器实例
-    analyzer = SemanticAnalyzer()
+    # 初始化CatalogPage和分析器、计划器实例
+    catalog = CatalogPage()
+    analyzer = SemanticAnalyzer(catalog)
     planner = Planner()
 
     # 先创建必要的表结构

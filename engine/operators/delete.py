@@ -1,3 +1,4 @@
+import struct
 from typing import Any, List, Tuple, Dict, Optional
 
 from engine.storage_engine import StorageEngine

@@ -10,6 +10,7 @@ from engine.data_page import DataPage
 from engine.exceptions import TableAlreadyExistsError, PrimaryKeyViolationError, TableNotFoundError, \
     UniquenessViolationError
 from storage.buffer_pool_manager import BufferPoolManager
+from engine.transaction_manager import TransactionManager
 
 if TYPE_CHECKING:
     from engine.index_manager import IndexManager
@@ -27,6 +28,8 @@ class StorageEngine:
         from engine.index_manager import IndexManager
         self.bpm = buffer_pool_manager
         self.index_managers: Dict[str, IndexManager] = {}
+        self.indexes: Dict[str, BPlusTree] = {}
+        self.txn_manager = TransactionManager(self)
 
         is_dirty = False
         catalog_page_raw = self.bpm.fetch_page(0)
@@ -124,6 +127,30 @@ class StorageEngine:
 
     def insert_row(self, table_name: str, row_data: bytes, row_dict: Dict[str, Any]) -> bool:
         """插入一行数据，并委托 IndexManager 更新所有相关索引。"""
+    def insert_row(self, table_name: str, row_data: bytes, txn_id: Optional[int] = None) -> bool:
+        """
+        插入一行数据。
+        - 如果 txn_id is None：立即写入（非事务模式）
+        - 如果 txn_id 不为 None：延迟写入（事务模式，等到 COMMIT 时才真正写）
+        """
+        if txn_id is not None:
+            # 🚩事务模式：不立即写入，先记录在 write set
+            rid_placeholder = ("pending", len(self.txn_manager.transactions[txn_id]['writes']))
+            # 用一个虚拟 rid 标记，commit 时再分配真正的 RID
+            self.txn_manager.add_write_set(
+                txn_id,
+                table_name,
+                rid_placeholder,
+                old_data=None,  # 插入操作没有旧数据
+                new_data=row_data  # 缓存未提交的新行
+            )
+            print(f"[TXN {txn_id}] Insert scheduled for table '{table_name}', waiting for COMMIT.")
+            return True
+
+        # 🚩非事务模式：立即执行原有逻辑
+        return self._do_insert_immediate(table_name, row_data)
+
+    def _do_insert_immediate(self, table_name: str, row_data: bytes) -> bool:
         table_metadata = self.catalog_page.get_table_metadata(table_name)
         if not table_metadata:
             raise TableNotFoundError(table_name)
@@ -358,12 +385,52 @@ class StorageEngine:
 
     def _delete_row_by_rid(self, table_name: str, rid: Tuple[int, int]) -> bool:
         """【内部方法】根据RID仅删除数据页上的一行数据（逻辑删除）。"""
+    def delete_row_by_rid(
+            self,
+            table_name: str,
+            rid: Tuple[int, int],
+            txn_id: Optional[int] = None
+    ) -> bool:
+        """
+        根据RID删除一行数据（逻辑删除）。
+        - 如果 txn_id is None: 立即删除 (非事务模式)。
+        - 如果 txn_id 不为 None: 延迟删除 (事务模式)。
+        """
         page_id, offset = rid
         page = self.bpm.fetch_page(page_id)
         if not page:
             raise IOError(f"无法为删除操作获取页面 {page_id}。")
 
-        deleted = False
+        try:
+            data_page = DataPage(page.page_id, page.data)
+            old_record = data_page.get_record(offset)
+            old_row_data = old_record[ROW_LENGTH_PREFIX_SIZE:] if old_record else None
+
+            if txn_id is not None:
+                # 🚩事务模式：只记录，不立即删除
+                self.txn_manager.add_write_set(
+                    txn_id,
+                    table_name,
+                    rid,
+                    old_data=old_row_data,  # 回滚时需要重新插回
+                    new_data=None
+                )
+                print(f"[TXN {txn_id}] Delete scheduled for table '{table_name}', rid={rid}, waiting for COMMIT.")
+                return True
+
+            # 🚩非事务模式：立即删除
+            return self._do_delete_immediate(table_name, rid)
+
+        finally:
+            self.bpm.unpin_page(page_id, False)
+
+    def _do_delete_immediate(self, table_name: str, rid: Tuple[int, int]) -> bool:
+        """真正执行删除，立即修改 DataPage。"""
+        page_id, offset = rid
+        page = self.bpm.fetch_page(page_id)
+        if not page:
+            raise IOError(f"无法为删除操作获取页面 {page_id}。")
+
         try:
             data_page = DataPage(page.page_id, page.data)
             deleted = data_page.delete_record(offset)
@@ -371,11 +438,31 @@ class StorageEngine:
                 page.data = bytearray(data_page.get_data())
             return deleted
         finally:
-            self.bpm.unpin_page(page_id, deleted)
+            self.bpm.unpin_page(page_id, True)
 
     def _update_row_by_rid(self, table_name: str, rid: Tuple[int, int], new_row_data: bytes) -> Optional[
         Tuple[int, int]]:
         """【内部方法】根据RID仅更新数据页上的一行数据。如果行移动，会返回新的RID。"""
+    def update_index_root(self, table_name: str, new_root_id: int) -> None:
+        """更新并持久化一个表的索引根页面ID。"""
+        metadata = self.catalog_page.get_table_metadata(table_name)
+        if not metadata:
+            raise TableNotFoundError(table_name)
+        metadata['index_root_page_id'] = new_root_id
+        self._flush_catalog_page()
+
+    def update_row_by_rid(
+            self,
+            table_name: str,
+            rid: Tuple[int, int],
+            new_row_data: bytes,
+            txn_id: Optional[int] = None
+    ) -> Optional[Tuple[int, int]]:
+        """
+        根据RID更新一行数据。
+        - 如果 txn_id is None: 立即更新 (非事务模式)。
+        - 如果 txn_id 不为 None: 延迟更新 (事务模式)。
+        """
         page_id, old_offset = rid
         page = self.bpm.fetch_page(page_id)
         if not page:
@@ -392,3 +479,51 @@ class StorageEngine:
             return None
         finally:
             self.bpm.unpin_page(page_id, True)
+            old_record = data_page.get_record(old_offset)
+            old_row_data = old_record[ROW_LENGTH_PREFIX_SIZE:] if old_record else None
+
+            if txn_id is not None:
+                # 🚩事务模式：只记录，不立即写入
+                self.txn_manager.add_write_set(
+                    txn_id,
+                    table_name,
+                    rid,
+                    old_data=old_row_data,  # 用于回滚
+                    new_data=new_row_data  # 提交时应用
+                )
+                print(f"[TXN {txn_id}] Update scheduled for table '{table_name}', rid={rid}, waiting for COMMIT.")
+                return rid  # RID 暂时不变
+
+            # 🚩非事务模式：立即更新
+            return self._do_update_immediate(table_name, rid, new_row_data)
+
+        finally:
+            self.bpm.unpin_page(page_id, False)
+
+    def _do_update_immediate(
+                    self,
+                    table_name: str,
+                    rid: Tuple[int, int],
+                    new_row_data: bytes
+            ) -> Optional[Tuple[int, int]]:
+                """真正执行更新，立即写 DataPage。"""
+                page_id, old_offset = rid
+                page = self.bpm.fetch_page(page_id)
+                if not page:
+                    raise IOError(f"无法为更新操作获取页面 {page_id}。")
+
+                try:
+                    data_page = DataPage(page.page_id, page.data)
+                    total_record_length = len(new_row_data) + ROW_LENGTH_PREFIX_SIZE
+                    new_record = total_record_length.to_bytes(ROW_LENGTH_PREFIX_SIZE, 'little') + new_row_data
+
+                    new_offset, moved = data_page.update_record(old_offset, new_record)
+                    page.data = bytearray(data_page.get_data())
+                    return (page_id, new_offset)
+                except (ValueError, IndexError):
+                    return None
+                finally:
+                    self.bpm.unpin_page(page_id, True)
+
+
+

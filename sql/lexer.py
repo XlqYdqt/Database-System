@@ -34,7 +34,7 @@ class Lexer:
         # DML / DDL
         'CREATE', 'TABLE', 'INSERT', 'INTO', 'SELECT', 'FROM', 'WHERE',
         'UPDATE', 'SET', 'DELETE', 'VALUES', 'INT', 'FLOAT', 'STRING',
-        'BOOL', 'PRIMARY', 'KEY', 'AND', 'OR', 'NOT', 'ORDER', 'BY',
+        'BOOL', 'PRIMARY', 'KEY', 'AND', 'OR', 'NOT', 'ORDER', 'BY','IN',
 
         # 事务控制关键字
         'BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'SET', 'TRANSACTION',
@@ -52,7 +52,25 @@ class Lexer:
         'GRANT', 'REVOKE', 'ROLE', 'USER', 'PRIVILEGES', 'ON', 'TO',
 
         # 通用关键字
-        'IF', 'EXISTS', 'NO', 'WAIT'
+        'IF', 'EXISTS', 'NO', 'WAIT',
+        # 聚合与分组
+        'GROUP', 'HAVING', 'DISTINCT',
+
+        # JOIN 相关
+        'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'ON',
+
+        # NULL 判断
+        'IS', 'NULL',
+
+        # 其他查询
+        'LIMIT', 'OFFSET', 'AS', 'LIKE', 'BETWEEN',
+        'UNION', 'ALL', 'EXCEPT', 'INTERSECT',
+
+        # 布尔字面量
+        'TRUE', 'FALSE',
+
+        # CASE 表达式
+        'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
     }
 
     OPERATORS = {
@@ -61,6 +79,7 @@ class Lexer:
 
     PUNCTUATIONS = {
         '(', ')', ',', ';', '.', '*'  # '*' 作为通配符处理
+
     }
 
     def __init__(self, sql: str):

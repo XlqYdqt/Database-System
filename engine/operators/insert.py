@@ -13,10 +13,11 @@ class InsertOperator:
     职责单一：将SQL的VALUES转换为字典和字节流，并调用 StorageEngine 的原子插入方法。
     """
 
-    def __init__(self, table_name: str, values: List[object], storage_engine: StorageEngine):
+    def __init__(self, table_name: str, values: List[List[object]], storage_engine: StorageEngine, txn_id: Optional[int] = None):
         self.table_name = table_name
         self.values = values
         self.storage_engine = storage_engine
+        self.txn_id = txn_id
 
     def execute(self) -> List[Any]:
         """

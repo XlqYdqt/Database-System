@@ -50,7 +50,7 @@ class FilterOperator(Operator):
                 return []
 
         # --- 路径 B: 全表扫描 + 过滤 ---
-        rows = self.executor.execute(self.child)
+        rows = self.executor.execute([self.child])
         results = []
         for rid, row in rows:
             if self._evaluate_condition(self.condition, row):
