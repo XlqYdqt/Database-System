@@ -308,38 +308,41 @@ class Planner:
         如果表达式是 IN 且右侧是子查询（SelectStatement），把右侧替换为 InSubquery 包含子计划。
         递归处理二元表达式的左右子表达式。
         """
-        # 如果是直接 IN AST 节点（假设 AST 中存在 InExpression）
-        # 因为 ast 的实现可能不同，我们使用属性检测
         if expr is None:
             return None
 
-        # 1) 检查二元表达式类型（有 left/op/right）
+        # 1) IN 表达式
         if hasattr(expr, 'op') and getattr(expr, 'op', None) and self._op_str(expr.op) == 'IN':
             right = expr.right
             left = expr.left
-            # 如果右侧是 SelectStatement（子查询），为其生成子计划
+            # 右侧是子查询
             if isinstance(right, SelectStatement):
+                # 先确保子查询生成完整逻辑计划（包括 Filter）
                 subplan = self.plan(right)
                 return InSubquery(left, subplan)
-            # 如果右侧是列表（IN (1,2,3)），保持原样
+            # 右侧是列表常量，保持原样
             return expr
 
-        # 2) 递归处理常见复合表达式（BinaryExpression 或类似）
+        # 2) 递归处理二元表达式
         if hasattr(expr, 'left') and hasattr(expr, 'right'):
             new_left = self._bind_in_subqueries(expr.left)
             new_right = self._bind_in_subqueries(expr.right)
-            # 尝试创建一个新实例或就地修改（以兼容不同 AST 实现）
+            # 尝试原地修改
             try:
                 expr.left = new_left
                 expr.right = new_right
                 return expr
             except Exception:
-                # 无法原地修改则返回新的轻量包装（保守处理）
-                return expr
+                # 无法原地修改则创建新的 BinaryExpression
+                return type(expr)(new_left, expr.op, new_right)
 
-        # 其他情况直接返回
+        # 3) 其他复合表达式（比如 UnaryExpression）递归 left/expr 属性
+        if hasattr(expr, 'expr'):
+            expr.expr = self._bind_in_subqueries(expr.expr)
+            return expr
+
+        # 4) 其他情况直接返回
         return expr
-
     def plan_select(self, statement: SelectStatement) -> LogicalPlan:
         """
         处理 SELECT：
