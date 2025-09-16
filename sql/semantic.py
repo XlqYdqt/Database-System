@@ -133,65 +133,78 @@ class SemanticAnalyzer:
                        outer_tables: Optional[Dict[str, List[ColumnDefinition]]] = None) -> SelectStatement:
         """分析SELECT语句，支持外部查询表引用"""
 
-        # 如果指定了表名，检查表是否存在（使用CatalogPage）
-        if statement.table_name and statement.table_name not in self.catalog.tables:
-            if not outer_tables or statement.table_name not in outer_tables:
-                raise SemanticError(f"表 '{statement.table_name}' 不存在")
-            table_columns = outer_tables[statement.table_name]
-        else:
-            table_metadata = self.catalog.get_table_metadata(statement.table_name) if statement.table_name else None
-            table_columns = list(table_metadata['schema'].values()) if table_metadata else []
+        print(f"分析 SELECT 语句: {statement}")  # Debug statement
+        print(f"catalog 中的表: {list(self.catalog.tables.keys())}")  # Debug statement
 
-        # 合并外部表和当前查询的表
-        all_tables = {}
+        # 初始化 all_tables 包含 catalog 中的所有表
+        all_tables = {table_name: list(table_metadata['schema'].values())
+                      for table_name, table_metadata in self.catalog.tables.items()}
+
         if outer_tables:
             all_tables.update(outer_tables)
-        if statement.table_name:
-            all_tables[statement.table_name] = table_columns
 
-        # 检查选择的列是否存在
+        # 检查主表是否存在
+        if statement.table_name:
+            if statement.table_name not in all_tables:
+                raise SemanticError(f"语义2：表 '{statement.table_name}' 不存在")
+            table_columns = all_tables[statement.table_name]
+        else:
+            table_columns = []
+
+        # 提前处理 JOIN 子句
+        for join_clause in statement.joins:
+            print(f"处理中JOIN子句: {join_clause.table}")  # Debug statement
+            if isinstance(join_clause.table, SelectStatement):
+                # 处理子查询 JOIN
+                self.analyze_select(join_clause.table, all_tables)
+            else:
+                join_table_name = str(join_clause.table)  # 确保表名是字符串
+
+                if join_table_name not in all_tables:
+                    print(f"JOIN表未找到: {join_table_name}")  # Debug statement
+                    print(f"当前 all_tables 中的表: {list(all_tables.keys())}")  # Debug statement
+                    raise SemanticError(f"JOIN表 '{join_table_name}' 不存在")
+
+                # 获取 JOIN 表元数据
+                join_table_metadata = self.catalog.get_table_metadata(join_table_name)
+                join_table_columns = list(join_table_metadata['schema'].values())
+
+                # 确保 JOIN 表在 all_tables 中
+                all_tables[join_table_name] = join_table_columns
+                print(f"已加入 JOIN 表: {join_table_name}")  # Debug statement
+
+                if join_clause.condition:
+                    self._check_expression(
+                        join_clause.condition,
+                        None,
+                        [],
+                        all_tables
+                    )
+
+        # 验证列引用
+        print(f"检查列引用前的 all_tables: {list(all_tables.keys())}")  # Debug statement
         for column_expr in statement.columns:
             self._check_column_expression(column_expr, statement.table_name, table_columns, all_tables)
 
-        # 检查 WHERE 条件中的表达式
+        # 验证 WHERE 子句表达式
         if statement.where:
             self._check_expression(statement.where, statement.table_name, table_columns, all_tables)
 
-        # 检查 ORDER BY 子句有效性
+        # 验证 ORDER BY 子句有效性
         if statement.order_by:
             for order_by_clause in statement.order_by:
                 self._check_expression(order_by_clause.expression, statement.table_name, table_columns, all_tables)
                 if order_by_clause.direction.upper() not in {'ASC', 'DESC'}:
                     raise SemanticError(f"ORDER BY 子句中的方向非法: {order_by_clause.direction}")
 
-        # 检查 GROUP BY 子句
+        # 验证 GROUP BY 子句
         if statement.group_by:
             for group_expr in statement.group_by:
                 self._check_expression(group_expr, statement.table_name, table_columns, all_tables)
 
-        # 检查 HAVING 子句
+        # 验证 HAVING 子句
         if statement.having:
             self._check_expression(statement.having, statement.table_name, table_columns, all_tables)
-
-        # ✅ 对于每个 JOIN 子句，检查表和条件，并加入 all_tables
-        for join_clause in statement.joins:
-            if isinstance(join_clause.table, SelectStatement):
-                self.analyze_select(join_clause.table, all_tables)
-            else:
-                if join_clause.table not in self.catalog.tables:
-                    raise SemanticError(f"JOIN表 '{join_clause.table}' 不存在")
-
-                join_table_metadata = self.catalog.get_table_metadata(join_clause.table)
-                join_table_columns = list(join_table_metadata['schema'].values())
-                all_tables[join_clause.table] = join_table_columns  # ✅ 加入 JOIN 表
-
-                if join_clause.condition:
-                    self._check_expression(
-                        join_clause.condition,
-                        statement.table_name,
-                        table_columns + join_table_columns,
-                        all_tables
-                    )
 
         return statement
 
