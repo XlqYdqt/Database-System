@@ -14,7 +14,8 @@ class SemanticAnalyzer:
     def __init__(self, catalog: CatalogPage):
         # 使用传入的CatalogPage实例作为元数据源
         self.catalog = catalog
-        # 不再需要内部维护的表和索引元数据
+        self.current_transaction = False  # 当前是否在事务中
+        self.savepoints = set()  # 当前事务中的保存点
         # 存储角色的权限信息：角色名 -> 授权信息列表
         self.roles: Dict[str, List[GrantStatement]] = {}
 
@@ -320,10 +321,109 @@ class SemanticAnalyzer:
 
     def analyze_transaction(self, statement: TransactionStatement) -> TransactionStatement:
         """分析事务控制语句"""
-        if statement.command not in TransactionCommand:
+        # 检查命令是否有效
+        if not isinstance(statement.command, TransactionCommand):
             raise SemanticError(f"不支持的事务操作: {statement.command}")
 
+        # 根据不同的命令类型进行特定检查
+        if statement.command == TransactionCommand.ROLLBACK:
+            # 检查 ROLLBACK 是否指定了不存在的保存点
+            if statement.savepoint_name and statement.savepoint_name not in self.savepoints:
+                raise SemanticError(f"保存点 '{statement.savepoint_name}' 不存在")
+
+            # 检查是否在事务中（除非是ROLLBACK TO SAVEPOINT）
+            if not statement.savepoint_name and not self.current_transaction:
+                raise SemanticError("ROLLBACK 语句只能在事务中使用")
+
+        elif statement.command == TransactionCommand.COMMIT:
+            # 检查是否在事务中
+            if not self.current_transaction:
+                raise SemanticError("COMMIT 语句只能在事务中使用")
+
+        elif statement.command == TransactionCommand.BEGIN:
+            # 检查是否已经在事务中
+            if self.current_transaction:
+                raise SemanticError("不能嵌套事务")
+
+            # 标记当前在事务中
+            self.current_transaction = True
+            self.savepoints.clear()  # 开始新事务时清除所有保存点
+
+        elif statement.command == TransactionCommand.SAVEPOINT:
+            # 检查是否在事务中
+            if not self.current_transaction:
+                raise SemanticError("SAVEPOINT 语句只能在事务中使用")
+
+            # 检查保存点名称是否唯一
+            if statement.savepoint_name in self.savepoints:
+                raise SemanticError(f"保存点 '{statement.savepoint_name}' 已存在")
+
+            # 添加保存点
+            self.savepoints.add(statement.savepoint_name)
+
+        elif statement.command == TransactionCommand.ROLLBACK_TO:
+            # 检查是否在事务中
+            if not self.current_transaction:
+                raise SemanticError("ROLLBACK TO 语句只能在事务中使用")
+
+            # 检查保存点是否存在
+            if statement.savepoint_name not in self.savepoints:
+                raise SemanticError(f"保存点 '{statement.savepoint_name}' 不存在")
+
+        elif statement.command == TransactionCommand.SET_TRANSACTION:
+            # 检查是否在事务中
+            if self.current_transaction:
+                raise SemanticError("SET TRANSACTION 语句必须在事务开始前执行")
+
+            # 检查隔离级别是否有效
+            if statement.isolation_level and not isinstance(statement.isolation_level, IsolationLevel):
+                raise SemanticError(f"不支持的隔离级别: {statement.isolation_level}")
+
         return statement
+
+    # def begin_transaction(self):
+    #     """开始一个新事务"""
+    #     if self.current_transaction:
+    #         raise SemanticError("不能嵌套事务")
+    #     self.current_transaction = True
+    #     self.savepoints.clear()
+    #
+    # def commit_transaction(self):
+    #     """提交当前事务"""
+    #     if not self.current_transaction:
+    #         raise SemanticError("没有活动的事务可以提交")
+    #     self.current_transaction = False
+    #     self.savepoints.clear()
+    #
+    # def rollback_transaction(self, savepoint_name=None):
+    #     """回滚事务或到指定保存点"""
+    #     if savepoint_name and savepoint_name not in self.savepoints:
+    #         raise SemanticError(f"保存点 '{savepoint_name}' 不存在")
+    #
+    #     if not savepoint_name and not self.current_transaction:
+    #         raise SemanticError("没有活动的事务可以回滚")
+    #
+    #     # 如果回滚到保存点，只移除该保存点之后的所有保存点
+    #     if savepoint_name:
+    #         # 找到保存点位置并移除之后的所有保存点
+    #         savepoints_list = sorted(self.savepoints)  # 假设保存点有顺序
+    #         index = savepoints_list.index(savepoint_name)
+    #         for sp in savepoints_list[index + 1:]:
+    #             self.savepoints.remove(sp)
+    #     else:
+    #         # 完全回滚事务
+    #         self.current_transaction = False
+    #         self.savepoints.clear()
+    #
+    # def create_savepoint(self, savepoint_name):
+    #     """创建保存点"""
+    #     if not self.current_transaction:
+    #         raise SemanticError("只能在事务中创建保存点")
+    #
+    #     if savepoint_name in self.savepoints:
+    #         raise SemanticError(f"保存点 '{savepoint_name}' 已存在")
+    #
+    #     self.savepoints.add(savepoint_name)
 
     def analyze_explain(self, statement: ExplainStatement) -> ExplainStatement:
         """分析EXPLAIN语句"""
