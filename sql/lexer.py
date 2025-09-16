@@ -34,7 +34,7 @@ class Lexer:
         # DML / DDL
         'CREATE', 'TABLE', 'INSERT', 'INTO', 'SELECT', 'FROM', 'WHERE',
         'UPDATE', 'SET', 'DELETE', 'VALUES', 'INT', 'FLOAT', 'STRING',
-        'BOOL', 'PRIMARY', 'KEY', 'AND', 'OR', 'NOT', 'ORDER', 'BY','IN',
+        'BOOL', 'PRIMARY', 'KEY', 'AND', 'OR', 'NOT', 'ORDER', 'BY','IN','ASC','DESC',
 
         # 事务控制关键字
         'BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'SET', 'TRANSACTION',
