@@ -43,7 +43,7 @@ class Lexer:
         'LOCK', 'UNLOCK', 'SHARE', 'EXCLUSIVE', 'CONCURRENTLY',
 
         # 索引关键字
-        'INDEX', 'USING', 'BTREE', 'HASH', 'DROP',
+        'INDEX', 'USING', 'BTREE', 'HASH', 'DROP','UNIQUE',
 
         # 查询优化关键字
         'EXPLAIN', 'ANALYZE',
@@ -71,6 +71,8 @@ class Lexer:
 
         # CASE 表达式
         'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+
+
     }
 
     OPERATORS = {

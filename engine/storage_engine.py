@@ -28,7 +28,6 @@ class StorageEngine:
         from engine.index_manager import IndexManager
         self.bpm = buffer_pool_manager
         self.index_managers: Dict[str, IndexManager] = {}
-        # self.indexes: Dict[str, BPlusTree] = {} # 此属性已移至 IndexManager
         self.txn_manager = TransactionManager(self)
 
         is_dirty = False
@@ -91,7 +90,10 @@ class StorageEngine:
         return self.index_managers.get(table_name)
 
     def create_table(self, table_name: str, columns: List[ColumnDefinition]) -> bool:
-        """创建新表，并自动为 PRIMARY KEY 和 UNIQUE 约束的列创建索引。"""
+        """
+        [MODIFIED]
+        创建新表，并自动为 PRIMARY KEY 和 UNIQUE 约束的列创建唯一索引。
+        """
         from engine.index_manager import IndexManager
         if table_name in self.catalog_page.tables:
             raise TableAlreadyExistsError(f"表 '{table_name}' 已存在。")
@@ -107,10 +109,14 @@ class StorageEngine:
 
             self.index_managers[table_name] = IndexManager(table_name, self)
 
+            # [MODIFIED] 循环检查列定义，为 PRIMARY KEY 和 UNIQUE 约束自动创建索引
             for col in columns:
                 is_pk = any(c[0] == ColumnConstraint.PRIMARY_KEY for c in col.constraints)
                 is_unique = any(c[0] == ColumnConstraint.UNIQUE for c in col.constraints)
+
+                # 如果是主键或唯一约束，则创建唯一索引
                 if is_pk or is_unique:
+                    # 对于主键，is_unique 必须为 True
                     self.index_managers[table_name].create_index(col.name, is_unique=True)
 
             empty_heap = TableHeapPage()
@@ -254,16 +260,13 @@ class StorageEngine:
 
     def _do_delete_immediate(self, table_name: str, rid: Tuple[int, int], old_row_dict: Dict[str, Any]) -> bool:
         """原子性地删除数据并更新所有索引。"""
-        # 1. 先删除所有索引条目
         index_manager = self.get_index_manager(table_name)
         if index_manager:
             index_manager.delete_entry(old_row_dict, rid)
 
-        # 2. 再删除数据页上的行
         page_id, offset = rid
         page = self.bpm.fetch_page(page_id)
         if not page:
-            # 如果索引已删但数据页找不到，这是一个严重问题，但对于操作本身算“完成”
             return False
         try:
             data_page = DataPage(page.page_id, page.data)
@@ -279,22 +282,18 @@ class StorageEngine:
         """原子性地更新数据并更新所有索引。"""
         index_manager = self.get_index_manager(table_name)
 
-        # 1. 更新前的预检查
         if index_manager:
             index_manager.check_uniqueness_for_update(old_row_dict, new_row_dict, old_rid)
 
-        # 2. 更新数据页
         new_rid = self._update_data_page_record(old_rid, new_row_data)
         if new_rid is None:
             return False
 
-        # 3. 更新索引
         if index_manager:
             try:
                 index_manager.delete_entry(old_row_dict, old_rid)
                 index_manager.insert_entry(new_row_dict, new_rid)
             except Exception as e:
-                # 尝试回滚数据页的修改
                 self._update_data_page_record(new_rid, self._serialize_row(table_name, old_row_dict))
                 raise RuntimeError(f"索引更新失败，数据修改已尝试回滚: {e}") from e
 

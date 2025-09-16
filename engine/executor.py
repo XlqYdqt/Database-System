@@ -1,5 +1,6 @@
 from typing import List, Optional, Any
 
+from sql.ast import BinaryExpression, Column, Literal
 from engine.operators.create_table import CreateTableOperator
 from engine.operators.insert import InsertOperator
 from engine.operators.project import ProjectOperator
@@ -8,9 +9,13 @@ from engine.operators.seq_scan import SeqScanOperator
 from engine.operators.update import UpdateOperator
 from engine.operators.delete import DeleteOperator
 from engine.operators.create_index import CreateIndexOperator
+# [NEW] 导入新的算子和计划类型
+from engine.operators.drop_index import DropIndexOperator
+from sql.planner import DropIndex
 
 from engine.storage_engine import StorageEngine
-from sql.planner import CreateTable, Insert, Project, Filter, SeqScan, Update, Delete, CreateIndex, Begin, Commit, Rollback
+from sql.planner import CreateTable, Insert, Project, Filter, SeqScan, Update, Delete, CreateIndex, Begin, Commit, \
+    Rollback
 
 
 class Executor:
@@ -28,7 +33,6 @@ class Executor:
         """执行一个或多个查询计划，返回结果集"""
         all_results = []
         for plan in plans:
-            # 获取当前操作的事务ID
             txn_id = self.current_txn_id
             result = None
 
@@ -36,6 +40,9 @@ class Executor:
                 result = self._execute_create_table(plan)
             elif isinstance(plan, CreateIndex):
                 result = self._execute_create_index(plan)
+            # [NEW] 增加对 DropIndex 计划的处理
+            elif isinstance(plan, DropIndex):
+                result = self._execute_drop_index(plan)
             elif isinstance(plan, Insert):
                 result = self._execute_insert(plan, txn_id)
             elif isinstance(plan, Update):
@@ -58,7 +65,6 @@ class Executor:
                 raise ValueError(f"不支持的计划类型: {type(plan)}")
 
             if result is not None:
-                # SELECT 等查询会返回多行结果，需要用 extend
                 if isinstance(result, list):
                     all_results.extend(result)
                 else:
@@ -72,17 +78,32 @@ class Executor:
         return []
 
     def _execute_create_index(self, op: CreateIndex) -> List[Any]:
-        op = CreateIndexOperator(
+        """
+        [FIX] 修正创建索引算子的实例化逻辑。
+        确保将 planner 生成的 'index_name', 'columns', 和 'unique'
+        正确地作为关键字参数传递给 CreateIndexOperator 的构造函数。
+        """
+        if not op.columns:
+            raise ValueError("CREATE INDEX 语句必须至少指定一列。")
+
+        # 直接将 planner 传来的参数透传给 Operator
+        operator = CreateIndexOperator(
             table_name=op.table_name,
-            column_name=op.column_name,
-            is_unique=op.is_unique,
+            index_name=op.index_name,
+            columns=op.columns,
+            unique=op.unique,
             storage_engine=self.storage_engine
         )
-        op.execute()
+        operator.execute()
         return []
 
+    def _execute_drop_index(self, op: DropIndex) -> List[Any]:
+        """[NEW] 执行删除索引的操作"""
+        drop_op = DropIndexOperator(op.index_name, self.storage_engine)
+        return drop_op.execute()
+
     def _execute_insert(self, op: Insert, txn_id: Optional[int]) -> List[Any]:
-        # 注意：INSERT VALUES 格式解析出的 op.values 是一个包含单行值的列表
+        # 注意 INSERT VALUES 格式可能有多行
         for row_values in op.values:
             insert_op = InsertOperator(op.table_name, row_values, self.storage_engine, txn_id)
             insert_op.execute()
@@ -102,7 +123,31 @@ class Executor:
         return seq_scan_op.execute()
 
     def _execute_filter(self, op: Filter) -> List[Any]:
-        filter_op = FilterOperator(op.condition, op.child, self.storage_engine, self)
+        table_name = op.table_name
+        bplus_tree = None
+
+        if isinstance(op.condition, BinaryExpression) and op.condition.op.value == '=':
+            left, right = op.condition.left, op.condition.right
+
+            if isinstance(left, Column) and isinstance(right, Literal):
+                column_name = left.name
+            elif isinstance(right, Column) and isinstance(left, Literal):
+                column_name = right.name
+            else:
+                column_name = None
+
+            if column_name:
+                index_manager = self.storage_engine.get_index_manager(table_name)
+                if index_manager:
+                    bplus_tree = index_manager.get_index_for_column(column_name)
+
+        filter_op = FilterOperator(
+            condition=op.condition,
+            child=op.child,
+            storage_engine=self.storage_engine,
+            executor=self,
+            bplus_tree=bplus_tree
+        )
         return filter_op.execute()
 
     def _execute_project(self, op: Project) -> List[Any]:

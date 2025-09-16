@@ -45,7 +45,7 @@ class Project(LogicalPlan):
 
 
 class Insert(LogicalPlan):
-    def __init__(self, table_name: str, columns: List[str], values: List[Expression]):
+    def __init__(self, table_name: str, columns: List[str], values: List[List[Expression]]):
         self.table_name = table_name
         self.columns = columns
         self.values = values
@@ -125,14 +125,17 @@ class Rollback(LogicalPlan):
 
 
 class CreateIndex(LogicalPlan):
-    def __init__(self, table_name: str, index_name: str, columns: List[str], index_type: Optional[IndexType] = None):
+    # [FIX] 增加 unique 属性以接收来自 Planner 的信息
+    def __init__(self, table_name: str, index_name: str, columns: List[str], unique: bool = False, index_type: Optional[IndexType] = None):
         self.table_name = table_name
         self.index_name = index_name
         self.columns = columns
+        self.unique = unique
         self.index_type = index_type
 
     def __repr__(self):
-        return (f"CreateIndex(table={self.table_name}, index={self.index_name}, columns={self.columns}, "
+        unique_str = "UNIQUE " if self.unique else ""
+        return (f"CreateIndex({unique_str}table={self.table_name}, index={self.index_name}, columns={self.columns}, "
                 f"index_type={self.index_type})")
 
 
@@ -249,175 +252,82 @@ class Planner:
         return CreateTable(statement.table_name, statement.columns)
 
     def plan_insert(self, statement: InsertStatement) -> Insert:
+        # 假设解析器总是生成 List[List[Expression]]
         return Insert(statement.table_name, statement.columns, statement.values)
 
     def _make_base_from(self, statement: SelectStatement) -> LogicalPlan:
         """
-        构造 FROM 部分的初始计划：
-        - 支持单表：statement.table_name 或 statement.from_tables（单元素）
-        - 支持多表 join 的简单合并（如果 AST 提供 join 信息，会在 plan_select 中处理）
+        构造 FROM 部分的初始计划
         """
-        # 支持两种 AST 风格：from_tables 或 table_name
-        if hasattr(statement, 'from_tables') and statement.from_tables:
-            # 假设 from_tables 是 table 名称列表或 TableRef 列表（可为字符串或具有 .name）
-            tables = statement.from_tables
-            # 将第一个表构造成 SeqScan
-            first = tables[0]
-            table0 = first.name if hasattr(first, 'name') else first
-            plan: LogicalPlan = SeqScan(table0)
-            # 如果有多个表但没有显式 join 条件，先顺序将它们交叉 join（笛卡尔），但通常 AST 会有 joins
-            for tbl in tables[1:]:
-                tbl_name = tbl.name if hasattr(tbl, 'name') else tbl
-                right = SeqScan(tbl_name)
-                plan = Join(plan, right, condition=None, join_type="CROSS")
-            return plan
-        elif hasattr(statement, 'table_name') and statement.table_name:
+        if hasattr(statement, 'table_name') and statement.table_name:
             return SeqScan(statement.table_name)
         else:
             raise ValueError("SELECT 语句缺少 FROM 子句或表名信息")
-
-
-
-    def _op_str(self, op) -> str:
-        """
-        将 op 规范化为大写字符串。
-        支持的输入：
-         - Operator 对象（有 .op 或 .value）
-         - 直接的字符串（'IN', 'AND', '>' 等）
-         - 其它可被 str() 转换的对象
-        返回大写字符串；如果 op 为 None 返回空字符串。
-        """
-        if op is None:
-            return ''
-        # 常见 AST 中可能为 Operator 对象，尝试读取常见属性
-        if hasattr(op, 'op'):
-            try:
-                return str(op.op).upper()
-            except Exception:
-                return str(op).upper()
-        if hasattr(op, 'value'):
-            try:
-                return str(op.value).upper()
-            except Exception:
-                return str(op).upper()
-        # 最后兜底：直接字符串化并 upper
-        return str(op).upper()
 
     def _bind_in_subqueries(self, expr: Expression) -> Expression:
         """
         如果表达式是 IN 且右侧是子查询（SelectStatement），把右侧替换为 InSubquery 包含子计划。
         递归处理二元表达式的左右子表达式。
         """
-        if expr is None:
-            return None
+        if expr is None: return None
 
-        # 1) IN 表达式
-        if hasattr(expr, 'op') and getattr(expr, 'op', None) and self._op_str(expr.op) == 'IN':
-            right = expr.right
-            left = expr.left
-            # 右侧是子查询
-            if isinstance(right, SelectStatement):
-                # 先确保子查询生成完整逻辑计划（包括 Filter）
-                subplan = self.plan(right)
-                return InSubquery(left, subplan)
-            # 右侧是列表常量，保持原样
+        if isinstance(expr, InExpression):
+            if isinstance(expr.values, SelectStatement):
+                subplan = self.plan(expr.values)
+                expr.values = subplan
             return expr
 
-        # 2) 递归处理二元表达式
-        if hasattr(expr, 'left') and hasattr(expr, 'right'):
-            new_left = self._bind_in_subqueries(expr.left)
-            new_right = self._bind_in_subqueries(expr.right)
-            # 尝试原地修改
-            try:
-                expr.left = new_left
-                expr.right = new_right
-                return expr
-            except Exception:
-                # 无法原地修改则创建新的 BinaryExpression
-                return type(expr)(new_left, expr.op, new_right)
+        if isinstance(expr, BinaryExpression):
+            expr.left = self._bind_in_subqueries(expr.left)
+            expr.right = self._bind_in_subqueries(expr.right)
 
-        # 3) 其他复合表达式（比如 UnaryExpression）递归 left/expr 属性
-        if hasattr(expr, 'expr'):
-            expr.expr = self._bind_in_subqueries(expr.expr)
-            return expr
+        if isinstance(expr, UnaryExpression):
+            expr.expression = self._bind_in_subqueries(expr.expression)
 
-        # 4) 其他情况直接返回
         return expr
+
     def plan_select(self, statement: SelectStatement) -> LogicalPlan:
         """
         处理 SELECT：
-        - 构造 FROM（SeqScan / Join） -> WHERE (Filter) -> PROJECT -> SORT（Order By）
-        - 兼容多种 AST 风格（from_tables / joins / order_by）
+        FROM (SeqScan / Join) -> WHERE (Filter) -> PROJECT -> SORT（Order By）
         """
-        # 1. FROM 部分（基础 plan）
+        # 1. FROM 部分
         plan = self._make_base_from(statement)
 
-        # 2. 如果 AST 提供 joins（包含 join 条件），将其应用（常见 AST 会有 joins 或 join_clauses）
-        joins = getattr(statement, 'joins', None) or getattr(statement, 'join_clauses', None)
-        if joins:
-            # 期望 joins 是类似 [(right_table, condition, type), ...] 或有属性的对象列表
-            for j in joins:
-                # 尝试提取右 表名 / plan
-                right_tbl = getattr(j, 'right', None) or (j[0] if isinstance(j, (list, tuple)) else None)
-                cond = getattr(j, 'condition', None) or (j[1] if isinstance(j, (list, tuple)) and len(j) > 1 else None)
-                jtype = getattr(j, 'type', None) or (j[2] if isinstance(j, (list, tuple)) and len(j) > 2 else "INNER")
-
-                right_name = right_tbl.name if hasattr(right_tbl, 'name') else right_tbl
-                right_plan = SeqScan(right_name)
-                plan = Join(plan, right_plan, condition=cond, join_type=(jtype or "INNER"))
+        # 2. Joins
+        if statement.joins:
+            for join_clause in statement.joins:
+                right_plan = SeqScan(join_clause.table)
+                plan = Join(plan, right_plan, condition=join_clause.condition, join_type=join_clause.join_type)
 
         # 3. WHERE 条件
-        where_expr = getattr(statement, 'where', None)
-        if where_expr:
-            # 绑定 IN (SELECT ...) 的子查询
-            where_expr = self._bind_in_subqueries(where_expr)
-            plan = Filter(where_expr, plan)
+        if statement.where:
+            plan = Filter(statement.where, plan)
 
         # 4. 投影
-        proj_cols = getattr(statement, 'columns', None)
-        if not proj_cols:
-            # 可能 AST 用 select_list 或 projections 命名
-            proj_cols = getattr(statement, 'select_list', None) or getattr(statement, 'projections', None) or ['*']
-        plan = Project(proj_cols, plan)
+        plan = Project(statement.columns, plan)
 
         # 5. ORDER BY / SORT
-        order_by = getattr(statement, 'order_by', None) or getattr(statement, 'order', None)
-        if order_by:
-            # 支持多种 order_by 表示方式：列表 of (expr, order) 或有 keys/orders 属性
-            if isinstance(order_by, list) and order_by and isinstance(order_by[0], tuple):
-                keys = [k for k, _ in order_by]
-                orders = [o for _, o in order_by]
-            else:
-                # 尝试读取属性 keys / orders
-                keys = getattr(order_by, 'keys', None) or getattr(order_by, 'columns', None) or [order_by]
-                orders = getattr(order_by, 'orders', None) or ['ASC'] * len(keys)
+        if statement.order_by:
+            keys = [ob.expression for ob in statement.order_by]
+            orders = [ob.direction for ob in statement.order_by]
             plan = Sort(keys, orders, plan)
 
         return plan
 
     def plan_update(self, statement: UpdateStatement) -> Update:
         """生成更新的逻辑计划，自动构造 child（SeqScan + 可选 Filter）"""
-        # 生成顺序扫描算子作为子操作符
         child = SeqScan(statement.table_name)
-
-        # 如果有WHERE条件，加入过滤算子
-        if getattr(statement, 'where', None):
+        if statement.where:
             child = Filter(statement.where, child)
-
-        # 生成 Update 操作符，传递 child 操作符
-        return Update(statement.table_name, statement.assignments, getattr(statement, 'where', None), child)
+        return Update(statement.table_name, statement.assignments, statement.where, child)
 
     def plan_delete(self, statement: DeleteStatement) -> Delete:
         """生成删除的逻辑计划，自动构造 child（SeqScan + 可选 Filter）"""
-        # 生成顺序扫描算子作为子操作符
         child = SeqScan(statement.table_name)
-
-        # 如果有WHERE条件，加入过滤算子
-        if getattr(statement, 'where', None):
+        if statement.where:
             child = Filter(statement.where, child)
-
-        # 生成 Delete 操作符，传递 child 操作符
-        return Delete(statement.table_name, getattr(statement, 'where', None), child)
+        return Delete(statement.table_name, statement.where, child)
 
     def plan_transaction(self, statement: TransactionStatement) -> LogicalPlan:
         if statement.command == TransactionCommand.BEGIN:
@@ -430,16 +340,25 @@ class Planner:
             raise ValueError(f"不支持的事务命令: {statement.command}")
 
     def plan_create_index(self, statement: CreateIndexStatement) -> CreateIndex:
-        return CreateIndex(statement.table_name, statement.index_name, statement.columns, index_type=statement.index_type)
+        # [FIX] 确保将 statement.unique 属性从AST节点传递给逻辑计划节点
+        return CreateIndex(
+            table_name=statement.table_name,
+            index_name=statement.index_name,
+            columns=statement.columns,
+            unique=statement.unique,
+            index_type=statement.index_type
+        )
 
     def plan_drop_index(self, statement: DropIndexStatement) -> DropIndex:
         return DropIndex(statement.index_name)
 
     def plan_grant(self, statement: GrantStatement) -> Grant:
-        return Grant(statement.privileges, statement.grantees, statement.object_type, statement.object_name)
+        privileges_str = [p.value for p in statement.privileges]
+        return Grant(privileges_str, statement.grantees, statement.object_type, statement.object_name)
 
     def plan_revoke(self, statement: RevokeStatement) -> Revoke:
-        return Revoke(statement.privileges, statement.grantees, statement.object_type, statement.object_name)
+        privileges_str = [p.value for p in statement.privileges]
+        return Revoke(privileges_str, statement.grantees, statement.object_type, statement.object_name)
 
     def plan_explain(self, statement: ExplainStatement) -> Explain:
         return Explain(self.plan(statement.statement), options=statement.options)
@@ -447,5 +366,6 @@ class Planner:
     def plan_create_role(self, statement: CreateRoleStatement) -> CreateRole:
         return CreateRole(statement.role_name)
 
-    def plan_grant_role(self, statement: GrantRoleStatement) -> GrantRole:  # 新增方法
+    def plan_grant_role(self, statement: GrantRoleStatement) -> GrantRole:
         return GrantRole(statement.roles, statement.grantees)
+
