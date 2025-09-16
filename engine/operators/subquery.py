@@ -1,50 +1,43 @@
 from typing import Any, Iterable, List
 
 from sql.ast import SelectStatement
-from sql.planner import Planner, LogicalPlan, Operator
+from sql.planner import Planner, LogicalPlan
 
 
 class SubqueryOperator:
     """
     执行子查询逻辑计划并返回一维值列表（用于 IN 或标量比较）。
-    - plan: 可以是 LogicalPlan / SelectStatement / Operator
-    - executor: 主执行器实例
     """
 
     def __init__(self, plan, executor: Any):
         self.plan = plan
         self.executor = executor
-        self._cached_result = None  # 缓存非相关子查询结果，避免重复执行
+        self._cached_result = None  # 缓存非相关子查询结果
 
     def _normalize_rows(self, rows: Iterable) -> List:
-        """把 executor 返回的 rows 规范化成一维值列表（取每行的第一个字段）"""
+        """
+        [FIX] 把 executor 返回的 rows 规范化成一维值列表，并严格校验列数。
+        """
         vals = []
         for item in rows:
-            # Case 1: (rid, dict) or (rid, row_list)
+            row_to_check = None
             if isinstance(item, tuple) and len(item) == 2:
                 _, row = item
-                if isinstance(row, dict):
-                    first_col_val = next(iter(row.values()))
-                    vals.append(first_col_val)
-                elif isinstance(row, (list, tuple)):
-                    vals.append(row[0])
-                else:
-                    vals.append(row)
-                continue
+                row_to_check = row
+            else:
+                row_to_check = item
 
-            # Case 2: dict
-            if isinstance(item, dict):
-                first_col_val = next(iter(item.values()))
-                vals.append(first_col_val)
-                continue
-
-            # Case 3: list/tuple (no rid)
-            if isinstance(item, (list, tuple)):
-                vals.append(item[0])
-                continue
-
-            # Case 4: scalar value
-            vals.append(item)
+            # 严格校验子查询结果只能有一列
+            if isinstance(row_to_check, dict):
+                if len(row_to_check) != 1:
+                    raise RuntimeError(f"子查询只能返回一列，但实际返回了 {len(row_to_check)} 列: {list(row_to_check.keys())}")
+                vals.append(next(iter(row_to_check.values())))
+            elif isinstance(row_to_check, (list, tuple)):
+                if len(row_to_check) != 1:
+                    raise RuntimeError(f"子查询只能返回一列，但实际返回了 {len(row_to_check)} 列")
+                vals.append(row_to_check[0])
+            else: # 标量值
+                vals.append(row_to_check)
         return vals
 
     def execute(self) -> List:
@@ -56,7 +49,6 @@ class SubqueryOperator:
 
         plan_obj = self.plan
         if isinstance(plan_obj, SelectStatement):
-            # 假设 Planner 不需要 catalog
             planner = Planner()
             plan_obj = planner.plan(plan_obj)
 
@@ -71,3 +63,4 @@ class SubqueryOperator:
         self._cached_result = vals
 
         return vals
+
