@@ -133,8 +133,8 @@ class SemanticAnalyzer:
                        outer_tables: Optional[Dict[str, List[ColumnDefinition]]] = None) -> SelectStatement:
         """分析SELECT语句，支持外部查询表引用"""
 
-        print(f"分析 SELECT 语句: {statement}")  # Debug statement
-        print(f"catalog 中的表: {list(self.catalog.tables.keys())}")  # Debug statement
+        # print(f"分析 SELECT 语句: {statement}")  # Debug statement
+        # print(f"catalog 中的表: {list(self.catalog.tables.keys())}")  # Debug statement
 
         # 初始化 all_tables 包含 catalog 中的所有表
         all_tables = {table_name: list(table_metadata['schema'].values())
@@ -153,7 +153,7 @@ class SemanticAnalyzer:
 
         # 提前处理 JOIN 子句
         for join_clause in statement.joins:
-            print(f"处理中JOIN子句: {join_clause.table}")  # Debug statement
+            # print(f"处理中JOIN子句: {join_clause.table}")  # Debug statement
             if isinstance(join_clause.table, SelectStatement):
                 # 处理子查询 JOIN
                 self.analyze_select(join_clause.table, all_tables)
@@ -171,7 +171,7 @@ class SemanticAnalyzer:
 
                 # 确保 JOIN 表在 all_tables 中
                 all_tables[join_table_name] = join_table_columns
-                print(f"已加入 JOIN 表: {join_table_name}")  # Debug statement
+                # print(f"已加入 JOIN 表: {join_table_name}")  # Debug statement
 
                 if join_clause.condition:
                     self._check_expression(
@@ -182,7 +182,7 @@ class SemanticAnalyzer:
                     )
 
         # 验证列引用
-        print(f"检查列引用前的 all_tables: {list(all_tables.keys())}")  # Debug statement
+        # print(f"检查列引用前的 all_tables: {list(all_tables.keys())}")  # Debug statement
         for column_expr in statement.columns:
             self._check_column_expression(column_expr, statement.table_name, table_columns, all_tables)
 

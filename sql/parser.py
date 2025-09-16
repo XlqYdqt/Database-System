@@ -283,15 +283,31 @@ class Parser:
         table_name = self._expect(TokenType.IDENTIFIER).value
 
         joins = []
+        # 修改 JOIN 解析逻辑，添加对简单 JOIN 关键字的支持
         while (self.current_token and
                self.current_token.type == TokenType.KEYWORD and
-               self.current_token.value in ('INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS')):
-            join_type = self.current_token.value
-            self._advance()
-            self._expect(TokenType.KEYWORD, 'JOIN')
+               self.current_token.value in ('INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS', 'JOIN')):
+            # 处理简单的 JOIN 关键字（默认为 INNER JOIN）
+            if self.current_token.value == 'JOIN':
+                join_type = 'INNER'
+                self._advance()
+            else:
+                join_type = self.current_token.value
+                self._advance()
+                # 确保消耗 JOIN 关键字
+                if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'JOIN':
+                    self._advance()
+
             join_table = self._expect(TokenType.IDENTIFIER).value
-            self._expect(TokenType.KEYWORD, 'ON')
-            join_condition = self.parse_expression()
+
+            # 检查是否有 ON 条件
+            if self.current_token and self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'ON':
+                self._advance()
+                join_condition = self.parse_expression()
+            else:
+                # 对于 CROSS JOIN，可能没有 ON 条件
+                join_condition = None
+
             joins.append(Join(join_type, join_table, join_condition))
 
         where_clause = None
