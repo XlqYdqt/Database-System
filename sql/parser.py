@@ -447,6 +447,11 @@ class Parser:
         """解析比较表达式 (Parses comparison expressions)"""
         left = self.parse_additive_expression()
 
+        # # 添加调试信息
+        # if self.current_token:
+        #     print(f"[DEBUG] 当前token: {self.current_token.value} (类型: {self.current_token.type})")
+
+        # 检查是否是运算符或关键字（包括 IN）
         if (self.current_token and
                 (self.current_token.type == TokenType.OPERATOR or
                  (self.current_token.type == TokenType.KEYWORD and
