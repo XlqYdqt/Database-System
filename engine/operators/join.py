@@ -8,29 +8,30 @@ from engine.storage_engine import StorageEngine
 
 
 class JoinOperator(Operator):
-    """JOIN 算子，支持 INNER JOIN，后续可扩展 LEFT/RIGHT/FULL/CROSS"""
+    """JOIN 算子，支持 INNER/LEFT/RIGHT/FULL/CROSS JOIN"""
 
     def __init__(self, join_type: str, condition: Expression,
                  left_child: Operator, right_child: Operator,
-                 storage_engine: StorageEngine, executor: Any):
-        self.join_type = join_type.upper()
+                 storage_engine: StorageEngine, executor: Any,
+                 left_table: str = None, right_table: str = None):
+        self.join_type = join_type.upper() if join_type else "INNER"
         self.condition = condition
         self.left_child = left_child
         self.right_child = right_child
         self.storage_engine = storage_engine
         self.executor = executor
 
+        # 表名或别名（如果 child 是 SeqScan 就能拿到 table_name）
+        self.left_alias = getattr(left_child, "table_name", left_table or "left")
+        self.right_alias = getattr(right_child, "table_name", right_table or "right")
+
     def execute(self) -> List[Tuple[Any, Dict[str, Any]]]:
-        """
-        执行 JOIN：
-        - 目前实现 Nested Loop Join（暴力匹配，后续可优化为 Hash Join / Merge Join）
-        - 返回结果行为 dict，key 是 "table.col" 形式，避免冲突
-        """
         left_rows = self.executor.execute([self.left_child])  # [(rid, row_dict), ...]
         right_rows = self.executor.execute([self.right_child])
 
         results = []
 
+        # INNER JOIN 默认逻辑
         for l_rid, l_row in left_rows:
             matched = False
             for r_rid, r_row in right_rows:
@@ -39,12 +40,12 @@ class JoinOperator(Operator):
                     results.append((None, combined))
                     matched = True
 
-            # LEFT JOIN：左边没匹配上也要保留
+            # LEFT JOIN 需要保留未匹配的左边行
             if self.join_type == "LEFT" and not matched:
                 combined = self._merge_rows(l_row, None)
                 results.append((None, combined))
 
-        # RIGHT JOIN：右边没匹配上也要保留
+        # RIGHT JOIN：保留未匹配的右边行
         if self.join_type == "RIGHT":
             for r_rid, r_row in right_rows:
                 matched = False
@@ -59,7 +60,6 @@ class JoinOperator(Operator):
 
         # FULL JOIN = LEFT + RIGHT
         if self.join_type == "FULL":
-            # 已经包含 INNER + LEFT
             right_unmatched = []
             for r_rid, r_row in right_rows:
                 matched = False
@@ -83,25 +83,38 @@ class JoinOperator(Operator):
 
         return results
 
-    def _merge_rows(self, left_row: Dict[str, Any], right_row: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_rows(self, left_row: Dict[str, Any], right_row: Dict[str, Any],
+                    left_alias: str = "users", right_alias: str = "orders") -> Dict[str, Any]:
         """
-        合并左右两行，列名用 table.col 避免歧义
+        合并左右两行，列名用 table.col 避免歧义。
+        如果某边是 None（LEFT/RIGHT JOIN 未匹配），则补充对应表的列为 None。
         """
         combined = {}
+
+        # 左表
         if left_row:
             for k, v in left_row.items():
-                combined[f"left.{k}"] = v
+                combined[f"{left_alias}.{k}"] = v
+        else:
+            # 左表没匹配时 → 填充空值
+            schema = self.storage_engine.catalog_page.get_table_metadata(left_alias)['schema']
+            for col_name in schema.keys():
+                combined[f"{left_alias}.{col_name}"] = None
+
+        # 右表
         if right_row:
             for k, v in right_row.items():
-                combined[f"right.{k}"] = v
+                combined[f"{right_alias}.{k}"] = v
+        else:
+            schema = self.storage_engine.catalog_page.get_table_metadata(right_alias)['schema']
+            for col_name in schema.keys():
+                combined[f"{right_alias}.{col_name}"] = None
+
         return combined
 
     def _evaluate_condition(self, condition: Expression, row: Dict[str, Any]) -> bool:
-        """
-        评估 JOIN 条件（通常是 BinaryExpression: users.id = orders.user_id）
-        """
         if condition is None:
-            return True  # CROSS JOIN 的情况
+            return True  # CROSS JOIN 情况
 
         if isinstance(condition, BinaryExpression):
             left_val = self._eval_expr(condition.left, row)
@@ -127,11 +140,8 @@ class JoinOperator(Operator):
         return False
 
     def _eval_expr(self, expr: Expression, row: Dict[str, Any]) -> Any:
-        """支持 Column / Literal"""
         if isinstance(expr, Column):
-            # 这里 Column 可能写成 users.id 或 orders.user_id
             col_name = expr.name
-            # 直接匹配 row 中的 key（前面 merge 已经加了 left. right. 前缀）
             for k in row.keys():
                 if k.endswith(f".{col_name}"):
                     return row[k]
