@@ -1,5 +1,6 @@
 from typing import List, Optional, Any
 
+from engine.operators.sort import SortOperator
 from sql.ast import BinaryExpression, Column, Literal
 from engine.operators.create_table import CreateTableOperator
 from engine.operators.insert import InsertOperator
@@ -12,8 +13,7 @@ from engine.operators.delete import DeleteOperator
 from engine.operators.create_index import CreateIndexOperator
 # [NEW] 导入新的算子和计划类型
 from engine.operators.drop_index import DropIndexOperator
-from sql.planner import DropIndex
-
+from sql.planner import DropIndex, Sort
 
 from engine.storage_engine import StorageEngine
 from sql.planner import (
@@ -68,6 +68,8 @@ class Executor:
                 result = self._execute_commit_transaction()
             elif isinstance(plan, Rollback):
                 result = self._execute_rollback_transaction()
+            elif isinstance(plan, Sort):  # 新增
+                result = self._execute_sort(plan)
             else:
                 raise ValueError(f"不支持的计划类型: {type(plan)}")
 
@@ -90,6 +92,20 @@ class Executor:
             executor=self
         )
         return join_op.execute()
+
+    def _execute_sort(self, op: Sort) -> List[Any]:
+        """
+        执行 Sort 逻辑节点。
+        op.keys: List[Column] 或列名
+        op.orders: List[str] 对应每列的 'ASC' 或 'DESC'
+        """
+        sort_op = SortOperator(
+            child=op.child,
+            keys=op.sort_keys,  # 列列表
+            orders=op.orders,  # 对应排序方式列表
+            executor=self  # 当前 Executor
+        )
+        return sort_op.execute()
 
     # --- 其他保持不变 ---
     def _execute_create_table(self, op: CreateTable) -> List[Any]:
